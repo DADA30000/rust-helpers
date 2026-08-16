@@ -1,0 +1,37 @@
+[package]
+name = "system-ui-helpers"
+version = "1.0.0"
+edition = "2021"
+
+[dependencies]
+# The absolute latest GTK4 / Glib ecosystem
+gtk4 = "0.11"
+glib = "0.22"
+gio = "0.22"
+gdk-pixbuf = "0.22"
+cairo-rs = "0.22"
+pango = "0.22"
+pangocairo = "0.22"
+
+# Standard serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# ureq v2 (v3 requires a massive rewrite for simple blocking HTTP calls)
+ureq = { version = "2.12", features = ["json"] }
+
+[[bin]]
+name = "umu-ui"
+path = "src/umu_ui.rs"
+
+[[bin]]
+name = "power-menu"
+path = "src/power_menu.rs"
+
+[[bin]]
+name = "singbox-control"
+path = "src/singbox_control.rs"
+
+[[bin]]
+name = "notify-trunc"
+path = "src/notify_trunc.rs"

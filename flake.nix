@@ -18,7 +18,7 @@
         in
         {
           default = pkgs.rustPlatform.buildRustPackage {
-            pname = "umu-ui";
+            pname = "system-ui-helpers";
             version = "1.0.0";
             src = ./.;
 
@@ -26,13 +26,15 @@
 
             nativeBuildInputs = [
               pkgs.pkg-config
-              pkgs.wrapGAppsHook3
+              pkgs.wrapGAppsHook4
             ];
 
             buildInputs = [
-              pkgs.gtk3
+              pkgs.gtk4
               pkgs.gdk-pixbuf
               pkgs.glib
+              pkgs.pango
+              pkgs.cairo
             ];
           };
         }
@@ -46,13 +48,16 @@
         {
           default = pkgs.mkShell {
             nativeBuildInputs = [ pkgs.pkg-config ];
+
             buildInputs = [
               pkgs.cargo
               pkgs.rustc
               pkgs.rust-analyzer
-              pkgs.gtk3
+              pkgs.gtk4
               pkgs.gdk-pixbuf
               pkgs.glib
+              pkgs.pango
+              pkgs.cairo
             ];
           };
         }

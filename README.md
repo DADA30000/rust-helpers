@@ -1,2 +1,2 @@
-# umu-ui
-vibecoded umu ui stuff
+# my rust gui helpers
+vibecoded and not stuff

@@ -597,6 +597,30 @@ pub fn open_steam_search_dialog(
     win.present();
 }
 
+pub fn persist_icon(icon_path: &str) -> String {
+    if icon_path.is_empty() || icon_path == "wine" {
+        return icon_path.to_string();
+    }
+    let path = Path::new(icon_path);
+    if !path.exists() {
+        return icon_path.to_string();
+    }
+
+    // Target directory: ~/.local/share/icons/umu
+    let dest_dir = get_xdg_data_home().join("icons/umu");
+    fs::create_dir_all(&dest_dir).ok();
+
+    let file_name = path.file_name().unwrap_or_default();
+    let dest_path = dest_dir.join(file_name);
+
+    // Copy if it's not already in the destination folder
+    if path.canonicalize().unwrap_or_default() != dest_path.canonicalize().unwrap_or_default() {
+        fs::copy(path, &dest_path).ok();
+    }
+
+    dest_path.to_string_lossy().to_string()
+}
+
 pub fn open_zoom_preview(parent: &gtk4::Window, icon_path: &str) {
     if icon_path.is_empty() || !Path::new(icon_path).exists() {
         return;

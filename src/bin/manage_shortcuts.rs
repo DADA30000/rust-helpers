@@ -502,7 +502,7 @@ fn open_edit_dialog(parent: &gtk4::Window, desktop_path: &str, on_saved: impl Fn
     btn_save.connect_clicked(move |_| {
         let mut new_name = ent_name.text().to_string();
         let new_exe = exe_entry.text().to_string();
-        let new_icon = fc_save.get_filename();
+        let new_icon = persist_icon(&fc_save.get_filename());
         let new_args = ent_args.text().to_string();
         let new_prefix = ent_prefix.text().to_string();
         let new_gpu = cmb_gpu.active_text().unwrap_or_default().to_string();

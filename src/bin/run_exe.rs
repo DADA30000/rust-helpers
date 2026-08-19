@@ -486,7 +486,7 @@ fn launch_window(filepath: &str, main_loop: glib::MainLoop) {
     btn_save.connect_clicked(move |_| {
         let target_exe = ee_save.text().to_string();
         let name = en_save.text().to_string();
-        let icon = fc_save.get_filename();
+        let icon = persist_icon(&fc_save.get_filename());
         let args = ea_save.text().to_string();
         let proton_type = cp_save.active_text().unwrap_or_default().to_string();
         let gpu_select = cg_save.active_text().unwrap_or_default().to_string();

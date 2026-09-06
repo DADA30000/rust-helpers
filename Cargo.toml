@@ -14,7 +14,6 @@ pangocairo = "0.22"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 ureq = { version = "2.12", features = ["json"] }
-urlencoding = "2.1"
 
 [lib]
 name = "system_ui_helpers"
@@ -35,14 +34,6 @@ path = "src/bin/manage_prefixes.rs"
 [[bin]]
 name = "fix-umu-path"
 path = "src/bin/fix_path.rs"
-
-[[bin]]
-name = "power-menu"
-path = "src/bin/power_menu.rs"
-
-[[bin]]
-name = "singbox-control"
-path = "src/bin/singbox_control.rs"
 
 [[bin]]
 name = "notify-trunc"

@@ -136,9 +136,16 @@ fn main() {
     let gs2 = get_selected.clone();
     btn_open.connect_clicked(move |_| {
         if let Some((_, path)) = gs2() {
-            let drive_c = PathBuf::from(path).join("drive_c");
-            fs::create_dir_all(&drive_c).ok();
-            Command::new("xdg-open").arg(drive_c).spawn().ok();
+            let p = PathBuf::from(path);
+            let target = if p.join("upper/drive_c").exists() {
+                p.join("upper/drive_c")
+            } else if p.join("upper").exists() {
+                p.join("upper")
+            } else {
+                p.join("drive_c")
+            };
+            fs::create_dir_all(&target).ok();
+            Command::new("xdg-open").arg(target).spawn().ok();
         }
     });
 

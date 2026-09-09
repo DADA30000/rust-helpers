@@ -38,3 +38,7 @@ path = "src/bin/fix_path.rs"
 [[bin]]
 name = "notify-trunc"
 path = "src/bin/notify_trunc.rs"
+
+[[bin]]
+name = "manage-running-prefix"
+path = "src/bin/manage_running_prefix.rs"

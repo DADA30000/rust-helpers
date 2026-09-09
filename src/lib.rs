@@ -672,11 +672,11 @@ pub fn extract_default_icon_for_exe(filepath: &str, prefix_name: &str) -> Option
             if !win_path.is_empty() && win_path != "-" {
                 let rel_path = regex_lite_sub_drive(&win_path);
                 let home = env::var("HOME").unwrap_or_else(|_| ".".to_string());
-                let p = PathBuf::from(home)
-                    .join(".umu")
-                    .join(prefix_name)
-                    .join("drive_c")
-                    .join(rel_path.trim_start_matches('/'));
+                let pfx_dir = PathBuf::from(home).join(".umu").join(prefix_name);
+                let rel_clean = rel_path.trim_start_matches('/');
+                let p_upper = pfx_dir.join("upper/drive_c").join(rel_clean);
+                let p_legacy = pfx_dir.join("drive_c").join(rel_clean);
+                let p = if p_upper.exists() { p_upper } else { p_legacy };
                 if p.exists() {
                     exe_target = p.to_string_lossy().to_string();
                 }

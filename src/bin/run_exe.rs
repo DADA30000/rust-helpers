@@ -551,11 +551,15 @@ fn launch_window(filepath: &str, main_loop: glib::MainLoop) {
                         rel_p
                     };
                     let home = env::var("HOME").unwrap_or_else(|_| ".".into());
-                    let cand = PathBuf::from(home)
-                        .join(".umu")
-                        .join(ep_save.text())
-                        .join("drive_c")
-                        .join(clean_p.trim_start_matches('/'));
+                    let pfx_dir = PathBuf::from(home).join(".umu").join(ep_save.text());
+                    let rel_clean = clean_p.trim_start_matches('/');
+                    let cand_upper = pfx_dir.join("upper/drive_c").join(rel_clean);
+                    let cand_legacy = pfx_dir.join("drive_c").join(rel_clean);
+                    let cand = if cand_upper.exists() {
+                        cand_upper
+                    } else {
+                        cand_legacy
+                    };
                     if cand.exists() {
                         actual_exe = cand.to_string_lossy().to_string();
                     }

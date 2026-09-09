@@ -424,18 +424,38 @@ fn open_edit_dialog(parent: &gtk4::Window, desktop_path: &str, on_saved: impl Fn
     let def_spec = get_xdg_data_home()
         .join("icons/umu")
         .join(format!("umu-{}.png", path_hash));
-    let def_spec_str = if def_spec.exists() {
-        def_spec.to_string_lossy().to_string()
-    } else {
-        "wine".into()
-    };
 
-    let def_s_clone = def_spec_str.clone();
+    let def_spec_clone = def_spec.clone();
     let fc_r = fc_icon.clone();
     let ip_r = img_preview.clone();
+    let ee_r = exe_entry.clone();
+    let ep_r = ent_prefix.clone();
+    let act_exe = actual_exe.clone();
     btn_icon_reset.connect_clicked(move |_| {
-        fc_r.set_filename(&def_s_clone);
-        set_image_from_path_or_theme(&ip_r, &def_s_clone, 48);
+        let chosen_icon = if def_spec_clone.is_file()
+            && std::fs::metadata(&def_spec_clone)
+                .map(|m| m.len() > 0)
+                .unwrap_or(false)
+        {
+            def_spec_clone.to_string_lossy().to_string()
+        } else {
+            let mut target_exe = ee_r.text().to_string();
+            if target_exe.is_empty() || !Path::new(&target_exe).exists() {
+                target_exe = act_exe.clone();
+            }
+            if !target_exe.is_empty() {
+                if let Some(cached) = extract_default_icon_for_exe(&target_exe, &ep_r.text()) {
+                    cached
+                } else {
+                    "wine".to_string()
+                }
+            } else {
+                "wine".to_string()
+            }
+        };
+
+        fc_r.set_filename(&chosen_icon);
+        set_image_from_path_or_theme(&ip_r, &chosen_icon, 48);
     });
 
     let w_zm = dlg.clone();
@@ -498,11 +518,18 @@ fn open_edit_dialog(parent: &gtk4::Window, desktop_path: &str, on_saved: impl Fn
     let w_save = dlg.clone();
     let on_s = Rc::new(on_saved);
     let fc_save = fc_icon.clone();
+    let p_hash = path_hash.clone();
 
     btn_save.connect_clicked(move |_| {
         let mut new_name = ent_name.text().to_string();
         let new_exe = exe_entry.text().to_string();
-        let new_icon = persist_icon(&fc_save.get_filename());
+        let sel_icon = fc_save.get_filename();
+        let cache_dir_str = get_cached_icons_dir().to_string_lossy().to_string();
+        let new_icon = if sel_icon.starts_with(&cache_dir_str) && sel_icon.contains("umu-") {
+            persist_icon_as(&sel_icon, Some(&format!("umu-{}.png", p_hash)))
+        } else {
+            persist_icon(&sel_icon)
+        };
         let new_args = ent_args.text().to_string();
         let new_prefix = ent_prefix.text().to_string();
         let new_gpu = cmb_gpu.active_text().unwrap_or_default().to_string();

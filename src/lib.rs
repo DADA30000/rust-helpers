@@ -597,7 +597,7 @@ pub fn open_steam_search_dialog(
     win.present();
 }
 
-pub fn persist_icon(icon_path: &str) -> String {
+pub fn persist_icon_as(icon_path: &str, custom_dest_filename: Option<&str>) -> String {
     if icon_path.is_empty() || icon_path == "wine" {
         return icon_path.to_string();
     }
@@ -610,8 +610,10 @@ pub fn persist_icon(icon_path: &str) -> String {
     let dest_dir = get_xdg_data_home().join("icons/umu");
     fs::create_dir_all(&dest_dir).ok();
 
-    let file_name = path.file_name().unwrap_or_default();
-    let dest_path = dest_dir.join(file_name);
+    let dest_path = match custom_dest_filename {
+        Some(name) => dest_dir.join(name),
+        None => dest_dir.join(path.file_name().unwrap_or_default()),
+    };
 
     // Copy if it's not already in the destination folder
     if path.canonicalize().unwrap_or_default() != dest_path.canonicalize().unwrap_or_default() {
@@ -619,6 +621,10 @@ pub fn persist_icon(icon_path: &str) -> String {
     }
 
     dest_path.to_string_lossy().to_string()
+}
+
+pub fn persist_icon(icon_path: &str) -> String {
+    persist_icon_as(icon_path, None)
 }
 
 pub fn open_zoom_preview(parent: &gtk4::Window, icon_path: &str) {
@@ -689,41 +695,78 @@ pub fn extract_default_icon_for_exe(filepath: &str, prefix_name: &str) -> Option
     let tmp_ico = tmp_dir.path().join("icon.ico");
     let tmp_png = tmp_dir.path().join("icon.png");
 
-    let status = Command::new("wrestool")
-        .args(["-x", "-t", "14", &exe_target])
-        .output();
-
-    if let Ok(res) = status {
-        if !res.stdout.is_empty() {
-            fs::write(&tmp_ico, res.stdout).ok();
-            Command::new("magick")
-                .arg(&tmp_ico)
-                .arg(&tmp_png)
-                .output()
-                .ok();
-
-            let mut generated = Vec::new();
-            if let Ok(entries) = fs::read_dir(tmp_dir.path()) {
-                for entry in entries.flatten() {
-                    let p = entry.path();
-                    if p.is_file()
-                        && p.file_name()
-                            .unwrap_or_default()
-                            .to_string_lossy()
-                            .starts_with("icon")
-                        && p.extension().map_or(false, |ext| ext == "png")
-                    {
-                        if let Ok(m) = p.metadata() {
-                            generated.push((m.len(), p));
+    let mut has_ico = false;
+    if exe_target.to_lowercase().ends_with(".ico") {
+        if fs::copy(&exe_target, &tmp_ico).is_ok() {
+            has_ico = true;
+        }
+    } else {
+        if let Ok(res) = Command::new("wrestool")
+            .args(["-x", "-t", "14", &exe_target])
+            .output()
+        {
+            if !res.stdout.is_empty() && fs::write(&tmp_ico, res.stdout).is_ok() {
+                has_ico = true;
+            }
+        }
+        if !has_ico {
+            if let Some(parent) = Path::new(&exe_target).parent() {
+                let stem = Path::new(&exe_target)
+                    .file_stem()
+                    .unwrap_or_default()
+                    .to_string_lossy();
+                let stem_ico = parent.join(format!("{}.ico", stem));
+                let stem_ico_lower = parent.join(format!("{}.ico", stem.to_lowercase()));
+                if stem_ico.is_file() {
+                    has_ico = fs::copy(&stem_ico, &tmp_ico).is_ok();
+                } else if stem_ico_lower.is_file() {
+                    has_ico = fs::copy(&stem_ico_lower, &tmp_ico).is_ok();
+                } else if let Ok(entries) = fs::read_dir(parent) {
+                    for entry in entries.flatten() {
+                        let p = entry.path();
+                        if p.is_file()
+                            && p.extension()
+                                .map_or(false, |e| e.eq_ignore_ascii_case("ico"))
+                        {
+                            if fs::copy(&p, &tmp_ico).is_ok() {
+                                has_ico = true;
+                                break;
+                            }
                         }
                     }
                 }
             }
-            if !generated.is_empty() {
-                generated.sort_by(|a, b| b.0.cmp(&a.0));
-                fs::copy(&generated[0].1, &out_icon).ok();
-                return Some(out_icon.to_string_lossy().to_string());
+        }
+    }
+
+    if has_ico {
+        Command::new("magick")
+            .arg(&tmp_ico)
+            .arg(&tmp_png)
+            .output()
+            .ok();
+
+        let mut generated = Vec::new();
+        if let Ok(entries) = fs::read_dir(tmp_dir.path()) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.is_file()
+                    && p.file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .starts_with("icon")
+                    && p.extension().map_or(false, |ext| ext == "png")
+                {
+                    if let Ok(m) = p.metadata() {
+                        generated.push((m.len(), p));
+                    }
+                }
             }
+        }
+        if !generated.is_empty() {
+            generated.sort_by(|a, b| b.0.cmp(&a.0));
+            fs::copy(&generated[0].1, &out_icon).ok();
+            return Some(out_icon.to_string_lossy().to_string());
         }
     }
     None

@@ -270,7 +270,6 @@ fn launch_window(filepath: &str, main_loop: glib::MainLoop) {
     });
 
     let default_extracted = extract_default_icon_for_exe(filepath, &ent_prefix.text());
-    let default_icon_str = default_extracted.clone().unwrap_or_default();
     if let Some(ref ico) = default_extracted {
         fc_icon.set_filename(ico);
         set_image_from_path_or_theme(&img_preview, ico, 48);
@@ -293,12 +292,19 @@ fn launch_window(filepath: &str, main_loop: glib::MainLoop) {
     preview_hbox.append(&btn_zoom);
     add_row(&c_grid, 2, "Предпросмотр иконки", preview_hbox.upcast_ref());
 
-    let def_ico_reset = default_icon_str.clone();
     let fc_r = fc_icon.clone();
     let ip_reset = img_preview.clone();
+    let ee_r = exe_entry.clone();
+    let ep_r = ent_prefix.clone();
     btn_icon_reset.connect_clicked(move |_| {
-        fc_r.set_filename(&def_ico_reset);
-        set_image_from_path_or_theme(&ip_reset, &def_ico_reset, 48);
+        let cur_exe = ee_r.text().to_string();
+        let target_icon = if let Some(extracted) = extract_default_icon_for_exe(&cur_exe, &ep_r.text()) {
+            extracted
+        } else {
+            "wine".to_string()
+        };
+        fc_r.set_filename(&target_icon);
+        set_image_from_path_or_theme(&ip_reset, &target_icon, 48);
     });
 
     let w_zoom = win.clone();
@@ -486,7 +492,13 @@ fn launch_window(filepath: &str, main_loop: glib::MainLoop) {
     btn_save.connect_clicked(move |_| {
         let target_exe = ee_save.text().to_string();
         let name = en_save.text().to_string();
-        let icon = persist_icon(&fc_save.get_filename());
+        let sel_icon = fc_save.get_filename();
+        let cache_prefix = get_cached_icons_dir().to_string_lossy().to_string();
+        let icon = if sel_icon.starts_with(&cache_prefix) {
+            sel_icon
+        } else {
+            persist_icon(&sel_icon)
+        };
         let args = ea_save.text().to_string();
         let proton_type = cp_save.active_text().unwrap_or_default().to_string();
         let gpu_select = cg_save.active_text().unwrap_or_default().to_string();

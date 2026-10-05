@@ -23,7 +23,7 @@ fn truncate_to_fit(text: &str, font_desc: &str, max_width_px: i32) -> String {
     let mut best_fit = chars.iter().take(1).collect::<String>() + "...";
 
     while low <= high {
-        let mid = (low + high) / 2;
+        let mid = usize::midpoint(low, high);
         let candidate = chars.iter().take(mid).collect::<String>() + "...";
         layout.set_text(&candidate);
         let (w, _) = layout.pixel_size();

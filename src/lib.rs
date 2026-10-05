@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::cell::RefCell;
 use std::env;
+use std::fmt::Write;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -17,20 +18,17 @@ struct TempDir(PathBuf);
 
 impl TempDir {
     fn new() -> Option<Self> {
-        let unique = format!(
-            "umu-tmp-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        );
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let pid = std::process::id();
+        let unique = format!("umu-tmp-{pid}-{nanos}");
         let p = env::temp_dir().join(unique);
         fs::create_dir_all(&p).ok()?;
-        Some(TempDir(p))
+        Some(Self(p))
     }
 
-    fn path(&self) -> &Path {
+    const fn path(&self) -> &PathBuf {
         &self.0
     }
 }
@@ -99,7 +97,7 @@ impl FileChooserButton {
         let current_path = Rc::new(RefCell::new(String::new()));
         let title_str = title.to_string();
         let parent_win = parent.clone();
-        let cp_click = current_path.clone();
+        let cp_click = Rc::clone(&current_path);
         let lbl_click = label.clone();
         let on_set = Rc::new(on_file_set);
 
@@ -110,23 +108,24 @@ impl FileChooserButton {
                 .action(gtk4::FileChooserAction::Open)
                 .build();
 
-            let cp = cp_click.clone();
+            let cp = Rc::clone(&cp_click);
             let lbl = lbl_click.clone();
-            let cb = on_set.clone();
+            let cb = Rc::clone(&on_set);
 
             dlg.connect_response(move |d, res| {
-                if res == gtk4::ResponseType::Accept {
-                    if let Some(f) = d.file() {
-                        let path = f.path().unwrap().to_string_lossy().to_string();
-                        *cp.borrow_mut() = path.clone();
-                        let fname = Path::new(&path)
-                            .file_name()
-                            .unwrap_or_default()
-                            .to_string_lossy()
-                            .to_string();
-                        lbl.set_text(&fname);
-                        cb(path);
-                    }
+                if res == gtk4::ResponseType::Accept
+                    && let Some(f) = d.file()
+                    && let Some(p) = f.path()
+                {
+                    let path = p.to_string_lossy().to_string();
+                    (*cp.borrow_mut()).clone_from(&path);
+                    let fname = Path::new(&path)
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string();
+                    lbl.set_text(&fname);
+                    cb(path);
                 }
                 d.destroy();
             });
@@ -140,10 +139,12 @@ impl FileChooserButton {
         }
     }
 
-    pub fn widget(&self) -> &gtk4::Button {
+    #[must_use]
+    pub const fn widget(&self) -> &gtk4::Button {
         &self.button
     }
 
+    #[must_use]
     pub fn get_filename(&self) -> String {
         self.current_path.borrow().clone()
     }
@@ -170,16 +171,18 @@ pub struct ProtonVersion {
     pub default: bool,
 }
 
+#[must_use]
 pub fn get_xdg_data_home() -> PathBuf {
-    if let Ok(val) = env::var("XDG_DATA_HOME") {
-        if !val.is_empty() {
-            return PathBuf::from(val);
-        }
+    if let Ok(val) = env::var("XDG_DATA_HOME")
+        && !val.is_empty()
+    {
+        return PathBuf::from(val);
     }
     let home = env::var("HOME").unwrap_or_else(|_| ".".to_string());
     PathBuf::from(home).join(".local/share")
 }
 
+#[must_use]
 pub fn get_cached_icons_dir() -> PathBuf {
     let home = env::var("HOME").unwrap_or_else(|_| ".".to_string());
     let dir = PathBuf::from(home).join(".cache/umu/icons");
@@ -187,24 +190,22 @@ pub fn get_cached_icons_dir() -> PathBuf {
     dir
 }
 
+#[must_use]
 pub fn load_proton_versions() -> Vec<ProtonVersion> {
-    if let Ok(val) = env::var("UMU_PROTON_VERSIONS_JSON") {
-        if let Ok(list) = serde_json::from_str::<Vec<ProtonVersion>>(&val) {
-            if !list.is_empty() {
-                return list;
-            }
-        }
+    if let Ok(val) = env::var("UMU_PROTON_VERSIONS_JSON")
+        && let Ok(list) = serde_json::from_str::<Vec<ProtonVersion>>(&val)
+        && !list.is_empty()
+    {
+        return list;
     }
 
     let candidate = get_xdg_data_home().join("umu-ui/proton_versions.json");
-    if candidate.exists() {
-        if let Ok(content) = fs::read_to_string(candidate) {
-            if let Ok(list) = serde_json::from_str::<Vec<ProtonVersion>>(&content) {
-                if !list.is_empty() {
-                    return list;
-                }
-            }
-        }
+    if candidate.exists()
+        && let Ok(content) = fs::read_to_string(candidate)
+        && let Ok(list) = serde_json::from_str::<Vec<ProtonVersion>>(&content)
+        && !list.is_empty()
+    {
+        return list;
     }
 
     vec![
@@ -231,15 +232,16 @@ pub fn load_proton_versions() -> Vec<ProtonVersion> {
     ]
 }
 
+#[must_use]
 pub fn get_default_proton_name(versions: &[ProtonVersion]) -> String {
     versions
         .iter()
         .find(|v| v.default)
         .or_else(|| versions.first())
-        .map(|v| v.name.clone())
-        .unwrap_or_else(|| "Proton UMU 10".into())
+        .map_or_else(|| "Proton UMU 10".to_string(), |v| v.name.clone())
 }
 
+#[must_use]
 pub fn get_games_appid_path() -> PathBuf {
     if let Ok(val) = env::var("STEAM_APP_ID_LIST_PATH") {
         let p = PathBuf::from(val);
@@ -250,13 +252,14 @@ pub fn get_games_appid_path() -> PathBuf {
     get_xdg_data_home().join("umu-ui/games_appid.json")
 }
 
+#[must_use]
 pub fn read_desktop_prop(path: &str, key: &str) -> String {
     if let Ok(content) = fs::read_to_string(path) {
         for line in content.lines() {
-            if let Some((k, v)) = line.split_once('=') {
-                if k.trim() == key {
-                    return v.to_string();
-                }
+            if let Some((k, v)) = line.split_once('=')
+                && k.trim() == key
+            {
+                return v.to_string();
             }
         }
     }
@@ -271,8 +274,8 @@ pub fn write_desktop_props(path: &str, props: &[(&str, &str)]) {
         for line in content.lines() {
             let mut replaced = false;
             for (k, v) in props {
-                if line.starts_with(&format!("{}=", k)) {
-                    new_lines.push(format!("{}={}", k, v));
+                if line.starts_with(&format!("{k}=")) {
+                    new_lines.push(format!("{k}={v}"));
                     written_keys.insert(*k);
                     replaced = true;
                     break;
@@ -285,7 +288,7 @@ pub fn write_desktop_props(path: &str, props: &[(&str, &str)]) {
 
         for (k, v) in props {
             if !written_keys.contains(k) {
-                new_lines.push(format!("{}={}", k, v));
+                new_lines.push(format!("{k}={v}"));
             }
         }
 
@@ -307,14 +310,15 @@ pub fn set_image_from_path_or_theme(img: &gtk4::Image, path: &str, display_size:
     img.set_icon_name(Some("wine"));
 }
 
+#[must_use]
 pub fn fetch_steam_icon_cached(appid: &str) -> Option<String> {
     let cache_dir = get_cached_icons_dir();
-    let dest_path = cache_dir.join(format!("steam-{}.png", appid));
+    let dest_path = cache_dir.join(format!("steam-{appid}.png"));
     if dest_path.exists() {
         return Some(dest_path.to_string_lossy().to_string());
     }
 
-    let info_url = format!("https://api.steamcmd.net/v1/info/{}", appid);
+    let info_url = format!("https://api.steamcmd.net/v1/info/{appid}");
     let resp: Value = ureq::get(&info_url)
         .timeout(std::time::Duration::from_secs(3))
         .call()
@@ -330,8 +334,7 @@ pub fn fetch_steam_icon_cached(appid: &str) -> Option<String> {
         .as_str()?;
 
     let ico_url = format!(
-        "https://cdn.cloudflare.steamstatic.com/steamcommunity/public/images/apps/{}/{}.ico",
-        appid, client_icon_hash
+        "https://cdn.cloudflare.steamstatic.com/steamcommunity/public/images/apps/{appid}/{client_icon_hash}.ico"
     );
 
     let mut ico_data = Vec::new();
@@ -363,11 +366,10 @@ pub fn fetch_steam_icon_cached(appid: &str) -> Option<String> {
                     .unwrap_or_default()
                     .to_string_lossy()
                     .starts_with("icon")
-                && p.extension().map_or(false, |ext| ext == "png")
+                && p.extension().is_some_and(|ext| ext == "png")
+                && let Ok(meta) = p.metadata()
             {
-                if let Ok(meta) = p.metadata() {
-                    generated_pngs.push((meta.len(), p));
-                }
+                generated_pngs.push((meta.len(), p));
             }
         }
     }
@@ -376,15 +378,101 @@ pub fn fetch_steam_icon_cached(appid: &str) -> Option<String> {
         return None;
     }
 
-    generated_pngs.sort_by(|a, b| b.0.cmp(&a.0));
+    generated_pngs.sort_by_key(|b| std::cmp::Reverse(b.0));
     fs::copy(&generated_pngs[0].1, &dest_path).ok()?;
 
     Some(dest_path.to_string_lossy().to_string())
 }
 
-pub fn open_steam_search_dialog(
+fn spawn_db_loader(db_tx: std::sync::mpsc::Sender<Vec<(String, String)>>) {
+    thread::spawn(move || {
+        let db_path = get_games_appid_path();
+        let mut apps = Vec::new();
+        if let Ok(content) = fs::read_to_string(db_path)
+            && let Ok(data) = serde_json::from_str::<Value>(&content)
+        {
+            if let Some(arr) = data.as_array() {
+                for item in arr {
+                    let name = item
+                        .get("name")
+                        .and_then(|n| n.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let appid = item
+                        .get("appid")
+                        .map_or_else(String::new, |a| a.to_string().replace('"', ""));
+                    if !name.is_empty() && !appid.is_empty() {
+                        apps.push((name, appid));
+                    }
+                }
+            } else if let Some(obj) = data.as_object() {
+                for (k, v) in obj {
+                    let name = v.get("name").and_then(|n| n.as_str()).map_or_else(
+                        || v.as_str().unwrap_or_default().to_string(),
+                        ToString::to_string,
+                    );
+                    if !name.is_empty() {
+                        apps.push((name, k.clone()));
+                    }
+                }
+            }
+        }
+        let _ = db_tx.send(apps);
+    });
+}
+
+fn create_search_row(
+    name: &str,
+    appid: &str,
+    icon_tx: &std::sync::mpsc::Sender<(String, String)>,
+) -> gtk4::ListBoxRow {
+    let row = gtk4::ListBoxRow::new();
+    row.set_selectable(false);
+    row.set_focusable(false);
+    row.set_activatable(true);
+    row.set_widget_name(&format!("{name}|{appid}"));
+
+    let row_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 12);
+    row_box.set_margin_top(6);
+    row_box.set_margin_bottom(6);
+    row_box.set_margin_start(8);
+    row_box.set_margin_end(8);
+
+    let img = gtk4::Image::new();
+    let cache_file = get_cached_icons_dir().join(format!("steam-{appid}.png"));
+    if cache_file.exists() {
+        set_image_from_path_or_theme(&img, cache_file.to_string_lossy().as_ref(), 64);
+    } else {
+        set_image_from_path_or_theme(&img, "wine", 64);
+        let a_clone = appid.to_string();
+        let itx = icon_tx.clone();
+        thread::spawn(move || {
+            if let Some(path) = fetch_steam_icon_cached(&a_clone) {
+                let _ = itx.send((a_clone, path));
+            }
+        });
+    }
+
+    let lbl = gtk4::Label::builder()
+        .label(format!("{name} ({appid})"))
+        .xalign(0.0)
+        .hexpand(true)
+        .build();
+
+    row_box.append(&img);
+    row_box.append(&lbl);
+    row.set_child(Some(&row_box));
+    row
+}
+
+fn build_steam_search_window(
     parent: &gtk4::Window,
-    on_selected: impl Fn(String, String, Option<String>) + 'static,
+) -> (
+    gtk4::Window,
+    gtk4::SearchEntry,
+    gtk4::ListBox,
+    gtk4::Label,
+    gtk4::Spinner,
 ) {
     let win = gtk4::Window::builder()
         .title("Поиск в Steam")
@@ -424,49 +512,20 @@ pub fn open_steam_search_dialog(
     status_box.append(&spinner);
     vbox.append(&status_box);
 
-    let (db_tx, db_rx) = std::sync::mpsc::channel::<Vec<(String, String)>>();
+    (win, search_entry, listbox, lbl_status, spinner)
+}
 
-    thread::spawn(move || {
-        let db_path = get_games_appid_path();
-        let mut apps = Vec::new();
-        if let Ok(content) = fs::read_to_string(db_path) {
-            if let Ok(data) = serde_json::from_str::<Value>(&content) {
-                if let Some(arr) = data.as_array() {
-                    for item in arr {
-                        let name = item
-                            .get("name")
-                            .and_then(|n| n.as_str())
-                            .unwrap_or("")
-                            .to_string();
-                        let appid = item
-                            .get("appid")
-                            .map(|a| a.to_string().replace('"', ""))
-                            .unwrap_or_default();
-                        if !name.is_empty() && !appid.is_empty() {
-                            apps.push((name, appid));
-                        }
-                    }
-                } else if let Some(obj) = data.as_object() {
-                    for (k, v) in obj {
-                        let name = if let Some(n) = v.get("name").and_then(|n| n.as_str()) {
-                            n.to_string()
-                        } else if let Some(s) = v.as_str() {
-                            s.to_string()
-                        } else {
-                            v.to_string()
-                        };
-                        if !name.is_empty() {
-                            apps.push((name, k.clone()));
-                        }
-                    }
-                }
-            }
-        }
-        db_tx.send(apps).ok();
-    });
+pub fn open_steam_search_dialog(
+    parent: &gtk4::Window,
+    on_selected: impl Fn(String, String, Option<String>) + 'static,
+) {
+    let (win, search_entry, listbox, lbl_status, spinner) = build_steam_search_window(parent);
+
+    let (db_tx, db_rx) = std::sync::mpsc::channel::<Vec<(String, String)>>();
+    spawn_db_loader(db_tx);
 
     let apps_cache = Rc::new(RefCell::new(Vec::new()));
-    let ac_load = apps_cache.clone();
+    let ac_load = Rc::clone(&apps_cache);
     let lbl_load = lbl_status.clone();
 
     glib::timeout_add_local(std::time::Duration::from_millis(80), move || {
@@ -477,10 +536,9 @@ pub fn open_steam_search_dialog(
                 lbl_load.set_markup("<span foreground='green'>БД Steam загружена</span>");
                 *ac_load.borrow_mut() = apps;
             }
-            glib::ControlFlow::Break
-        } else {
-            glib::ControlFlow::Continue
+            return glib::ControlFlow::Break;
         }
+        glib::ControlFlow::Continue
     });
 
     let (icon_tx, icon_rx) = std::sync::mpsc::channel::<(String, String)>();
@@ -490,16 +548,13 @@ pub fn open_steam_search_dialog(
         while let Ok((appid, icon_path)) = icon_rx.try_recv() {
             let mut child = lb_icons.first_child();
             while let Some(row_widget) = child {
-                if let Some(row) = row_widget.downcast_ref::<gtk4::ListBoxRow>() {
-                    if row.widget_name().ends_with(&format!("|{}", appid)) {
-                        if let Some(bx) = row.child().and_then(|c| c.downcast::<gtk4::Box>().ok()) {
-                            if let Some(img_w) = bx.first_child() {
-                                if let Some(img) = img_w.downcast_ref::<gtk4::Image>() {
-                                    set_image_from_path_or_theme(img, &icon_path, 64);
-                                }
-                            }
-                        }
-                    }
+                if let Some(row) = row_widget.downcast_ref::<gtk4::ListBoxRow>()
+                    && row.widget_name().ends_with(&format!("|{appid}"))
+                    && let Some(bx) = row.child().and_then(|c| c.downcast::<gtk4::Box>().ok())
+                    && let Some(img_w) = bx.first_child()
+                    && let Some(img) = img_w.downcast_ref::<gtk4::Image>()
+                {
+                    set_image_from_path_or_theme(img, &icon_path, 64);
                 }
                 child = row_widget.next_sibling();
             }
@@ -507,10 +562,8 @@ pub fn open_steam_search_dialog(
         glib::ControlFlow::Continue
     });
 
-    let ac_filter = apps_cache.clone();
+    let ac_filter = Rc::clone(&apps_cache);
     let lb_filter = listbox.clone();
-    let lbl_search = lbl_status.clone();
-    let spin_search = spinner.clone();
 
     search_entry.connect_search_changed(move |entry| {
         let query = entry.text().trim().to_lowercase();
@@ -519,8 +572,8 @@ pub fn open_steam_search_dialog(
         }
 
         if query.is_empty() {
-            lbl_search.set_markup("<span foreground='gray'>Ожидание поиска</span>");
-            spin_search.stop();
+            lbl_status.set_markup("<span foreground='gray'>Ожидание поиска</span>");
+            spinner.stop();
             return;
         }
 
@@ -535,45 +588,10 @@ pub fn open_steam_search_dialog(
             }
         }
 
-        lbl_search.set_text(&format!("Найдено игр: {}", results.len()));
+        lbl_status.set_text(&format!("Найдено игр: {}", results.len()));
 
         for (name, appid) in &results {
-            let row = gtk4::ListBoxRow::new();
-            row.set_selectable(false);
-            row.set_focusable(false);
-            row.set_activatable(true);
-            row.set_widget_name(&format!("{}|{}", name, appid));
-
-            let row_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 12);
-            row_box.set_margin_top(6);
-            row_box.set_margin_bottom(6);
-            row_box.set_margin_start(8);
-            row_box.set_margin_end(8);
-
-            let img = gtk4::Image::new();
-            let cache_file = get_cached_icons_dir().join(format!("steam-{}.png", appid));
-            if cache_file.exists() {
-                set_image_from_path_or_theme(&img, &cache_file.to_string_lossy().to_string(), 64);
-            } else {
-                set_image_from_path_or_theme(&img, "wine", 64);
-                let a_clone = appid.clone();
-                let itx = icon_tx.clone();
-                thread::spawn(move || {
-                    if let Some(path) = fetch_steam_icon_cached(&a_clone) {
-                        itx.send((a_clone, path)).ok();
-                    }
-                });
-            }
-
-            let lbl = gtk4::Label::builder()
-                .label(&format!("{} ({})", name, appid))
-                .xalign(0.0)
-                .hexpand(true)
-                .build();
-
-            row_box.append(&img);
-            row_box.append(&lbl);
-            row.set_child(Some(&row_box));
+            let row = create_search_row(name, appid, &icon_tx);
             lb_filter.append(&row);
         }
     });
@@ -583,7 +601,7 @@ pub fn open_steam_search_dialog(
     listbox.connect_row_activated(move |_, row| {
         let name_id = row.widget_name().to_string();
         if let Some((name, appid)) = name_id.split_once('|') {
-            let cache_file = get_cached_icons_dir().join(format!("steam-{}.png", appid));
+            let cache_file = get_cached_icons_dir().join(format!("steam-{appid}.png"));
             let icon_str = if cache_file.exists() {
                 Some(cache_file.to_string_lossy().to_string())
             } else {
@@ -597,6 +615,7 @@ pub fn open_steam_search_dialog(
     win.present();
 }
 
+#[must_use]
 pub fn persist_icon_as(icon_path: &str, custom_dest_filename: Option<&str>) -> String {
     if icon_path.is_empty() || icon_path == "wine" {
         return icon_path.to_string();
@@ -610,10 +629,10 @@ pub fn persist_icon_as(icon_path: &str, custom_dest_filename: Option<&str>) -> S
     let dest_dir = get_xdg_data_home().join("icons/umu");
     fs::create_dir_all(&dest_dir).ok();
 
-    let dest_path = match custom_dest_filename {
-        Some(name) => dest_dir.join(name),
-        None => dest_dir.join(path.file_name().unwrap_or_default()),
-    };
+    let dest_path = custom_dest_filename.map_or_else(
+        || dest_dir.join(path.file_name().unwrap_or_default()),
+        |name| dest_dir.join(name),
+    );
 
     // Copy if it's not already in the destination folder
     if path.canonicalize().unwrap_or_default() != dest_path.canonicalize().unwrap_or_default() {
@@ -623,6 +642,7 @@ pub fn persist_icon_as(icon_path: &str, custom_dest_filename: Option<&str>) -> S
     dest_path.to_string_lossy().to_string()
 }
 
+#[must_use]
 pub fn persist_icon(icon_path: &str) -> String {
     persist_icon_as(icon_path, None)
 }
@@ -661,31 +681,38 @@ pub fn open_zoom_preview(parent: &gtk4::Window, icon_path: &str) {
     zoom_win.present();
 }
 
-pub fn extract_default_icon_for_exe(filepath: &str, prefix_name: &str) -> Option<String> {
-    let mut exe_target = filepath.to_string();
-    if filepath.to_lowercase().ends_with(".lnk") {
-        if let Ok(out) = Command::new("exiftool")
+fn resolve_lnk_target(filepath: &str, prefix_name: &str) -> String {
+    if filepath.to_lowercase().ends_with(".lnk")
+        && let Ok(out) = Command::new("exiftool")
             .args(["-s3", "-LocalBasePath", filepath])
             .output()
-        {
-            let win_path = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if !win_path.is_empty() && win_path != "-" {
-                let rel_path = regex_lite_sub_drive(&win_path);
-                let home = env::var("HOME").unwrap_or_else(|_| ".".to_string());
-                let pfx_dir = PathBuf::from(home).join(".umu").join(prefix_name);
-                let rel_clean = rel_path.trim_start_matches('/');
-                let p_upper = pfx_dir.join("upper/drive_c").join(rel_clean);
-                let p_legacy = pfx_dir.join("drive_c").join(rel_clean);
-                let p = if p_upper.exists() { p_upper } else { p_legacy };
-                if p.exists() {
-                    exe_target = p.to_string_lossy().to_string();
-                }
+    {
+        let win_path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if !win_path.is_empty() && win_path != "-" {
+            let rel_path = regex_lite_sub_drive(&win_path);
+            let home = env::var("HOME").unwrap_or_else(|_| ".".to_string());
+            let pfx_dir = PathBuf::from(home).join(".umu").join(prefix_name);
+            let rel_clean = rel_path.trim_start_matches('/');
+            let p_upper = pfx_dir.join("upper/drive_c").join(rel_clean);
+            let p_legacy = pfx_dir.join("drive_c").join(rel_clean);
+            let p = if p_upper.exists() { p_upper } else { p_legacy };
+            if p.exists() {
+                return p.to_string_lossy().to_string();
             }
         }
     }
+    filepath.to_string()
+}
+
+#[must_use]
+pub fn extract_default_icon_for_exe(filepath: &str, prefix_name: &str) -> Option<String> {
+    let exe_target = resolve_lnk_target(filepath, prefix_name);
 
     let digest = md5::compute(filepath.as_bytes());
-    let hash: String = digest.iter().map(|b| format!("{:02x}", b)).collect();
+    let mut hash = String::with_capacity(32);
+    for byte in digest {
+        let _ = write!(hash, "{byte:02x}");
+    }
     let out_icon = get_cached_icons_dir().join(format!("umu-{}.png", &hash[..8]));
     if out_icon.exists() {
         return Some(out_icon.to_string_lossy().to_string());
@@ -704,35 +731,31 @@ pub fn extract_default_icon_for_exe(filepath: &str, prefix_name: &str) -> Option
         if let Ok(res) = Command::new("wrestool")
             .args(["-x", "-t", "14", &exe_target])
             .output()
+            && !res.stdout.is_empty()
+            && fs::write(&tmp_ico, res.stdout).is_ok()
         {
-            if !res.stdout.is_empty() && fs::write(&tmp_ico, res.stdout).is_ok() {
-                has_ico = true;
-            }
+            has_ico = true;
         }
-        if !has_ico {
-            if let Some(parent) = Path::new(&exe_target).parent() {
-                let stem = Path::new(&exe_target)
-                    .file_stem()
-                    .unwrap_or_default()
-                    .to_string_lossy();
-                let stem_ico = parent.join(format!("{}.ico", stem));
-                let stem_ico_lower = parent.join(format!("{}.ico", stem.to_lowercase()));
-                if stem_ico.is_file() {
-                    has_ico = fs::copy(&stem_ico, &tmp_ico).is_ok();
-                } else if stem_ico_lower.is_file() {
-                    has_ico = fs::copy(&stem_ico_lower, &tmp_ico).is_ok();
-                } else if let Ok(entries) = fs::read_dir(parent) {
-                    for entry in entries.flatten() {
-                        let p = entry.path();
-                        if p.is_file()
-                            && p.extension()
-                                .map_or(false, |e| e.eq_ignore_ascii_case("ico"))
-                        {
-                            if fs::copy(&p, &tmp_ico).is_ok() {
-                                has_ico = true;
-                                break;
-                            }
-                        }
+        if !has_ico && let Some(parent) = Path::new(&exe_target).parent() {
+            let stem = Path::new(&exe_target)
+                .file_stem()
+                .unwrap_or_default()
+                .to_string_lossy();
+            let stem_ico = parent.join(format!("{stem}.ico"));
+            let stem_ico_lower = parent.join(format!("{}.ico", stem.to_lowercase()));
+            if stem_ico.is_file() {
+                has_ico = fs::copy(&stem_ico, &tmp_ico).is_ok();
+            } else if stem_ico_lower.is_file() {
+                has_ico = fs::copy(&stem_ico_lower, &tmp_ico).is_ok();
+            } else if let Ok(entries) = fs::read_dir(parent) {
+                for entry in entries.flatten() {
+                    let p = entry.path();
+                    if p.is_file()
+                        && p.extension().is_some_and(|e| e.eq_ignore_ascii_case("ico"))
+                        && fs::copy(&p, &tmp_ico).is_ok()
+                    {
+                        has_ico = true;
+                        break;
                     }
                 }
             }
@@ -755,16 +778,15 @@ pub fn extract_default_icon_for_exe(filepath: &str, prefix_name: &str) -> Option
                         .unwrap_or_default()
                         .to_string_lossy()
                         .starts_with("icon")
-                    && p.extension().map_or(false, |ext| ext == "png")
+                    && p.extension().is_some_and(|ext| ext == "png")
+                    && let Ok(m) = p.metadata()
                 {
-                    if let Ok(m) = p.metadata() {
-                        generated.push((m.len(), p));
-                    }
+                    generated.push((m.len(), p));
                 }
             }
         }
         if !generated.is_empty() {
-            generated.sort_by(|a, b| b.0.cmp(&a.0));
+            generated.sort_by_key(|b| std::cmp::Reverse(b.0));
             fs::copy(&generated[0].1, &out_icon).ok();
             return Some(out_icon.to_string_lossy().to_string());
         }
@@ -782,70 +804,400 @@ fn regex_lite_sub_drive(path: &str) -> String {
 }
 
 mod md5 {
+    const SHIFTS: [u32; 64] = [
+        7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 5, 9, 14, 20, 5, 9, 14, 20, 5,
+        9, 14, 20, 5, 9, 14, 20, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 6, 10,
+        15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21,
+    ];
+
+    const TABLE_K: [u32; 64] = [
+        0xd76a_a478,
+        0xe8c7_b756,
+        0x2420_70db,
+        0xc1bd_ceee,
+        0xf57c_0faf,
+        0x4787_c62a,
+        0xa830_4613,
+        0xfd46_9501,
+        0x6980_98d8,
+        0x8b44_f7af,
+        0xffff_5bb1,
+        0x895c_d7be,
+        0x6b90_1122,
+        0xfd98_7193,
+        0xa679_438e,
+        0x49b4_0821,
+        0xf61e_2562,
+        0xc040_b340,
+        0x265e_5a51,
+        0xe9b6_c7aa,
+        0xd62f_105d,
+        0x0244_1453,
+        0xd8a1_e681,
+        0xe7d3_fbc8,
+        0x21e1_cde6,
+        0xc337_07d6,
+        0xf4d5_0d87,
+        0x455a_14ed,
+        0xa9e3_e905,
+        0xfcef_a3f8,
+        0x676f_02d9,
+        0x8d2a_4c8a,
+        0xfffa_3942,
+        0x8771_f681,
+        0x6d9d_6122,
+        0xfde5_380c,
+        0xa4be_ea44,
+        0x4bde_cfa9,
+        0xf6bb_4b60,
+        0xbebf_bc70,
+        0x289b_7ec6,
+        0xeaa1_27fa,
+        0xd4ef_3085,
+        0x0488_1d05,
+        0xd9d4_d039,
+        0xe6db_99e5,
+        0x1fa2_7cf8,
+        0xc4ac_5665,
+        0xf429_2244,
+        0x432a_ff97,
+        0xab94_23a7,
+        0xfc93_a039,
+        0x655b_59c3,
+        0x8f0c_cc92,
+        0xffef_f47d,
+        0x8584_5dd1,
+        0x6fa8_7e4f,
+        0xfe2c_e6e0,
+        0xa301_4314,
+        0x4e08_11a1,
+        0xf753_7e82,
+        0xbd3a_f235,
+        0x2ad7_d2bb,
+        0xeb86_d391,
+    ];
+
     pub fn compute(input: &[u8]) -> [u8; 16] {
-        let mut d = 0x10325476u32;
-        let mut c = 0x98badcfeu32;
-        let mut b = 0xefcdab89u32;
-        let mut a = 0x67452301u32;
+        let mut state_d = 0x1032_5476_u32;
+        let mut state_c = 0x98ba_dcfe_u32;
+        let mut state_b = 0xefcd_ab89_u32;
+        let mut state_a = 0x6745_2301_u32;
         let mut msg = input.to_vec();
-        let orig_len = (input.len() as u64) * 8;
+        let orig_bit_len = u64::try_from(input.len()).unwrap_or(0).wrapping_mul(8);
         msg.push(0x80);
         while (msg.len() % 64) != 56 {
             msg.push(0);
         }
-        msg.extend_from_slice(&orig_len.to_le_bytes());
+        msg.extend_from_slice(&orig_bit_len.to_le_bytes());
 
-        for chunk in msg.chunks(64) {
-            let mut w = [0u32; 16];
-            for (i, c) in chunk.chunks(4).enumerate() {
-                w[i] = u32::from_le_bytes([c[0], c[1], c[2], c[3]]);
+        let (chunks, _) = msg.as_chunks::<64>();
+        for chunk in chunks {
+            let mut words = [0u32; 16];
+            let (slices, _) = chunk.as_chunks::<4>();
+            for (idx, slice) in slices.iter().enumerate() {
+                words[idx] = u32::from_le_bytes(*slice);
             }
-            let (mut aa, mut bb, mut cc, mut dd) = (a, b, c, d);
+            let (mut acc_a, mut acc_b, mut acc_c, mut acc_d) = (state_a, state_b, state_c, state_d);
 
-            let s = [
-                7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 5, 9, 14, 20, 5, 9, 14,
-                20, 5, 9, 14, 20, 5, 9, 14, 20, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11,
-                16, 23, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21,
-            ];
-            let k: [u32; 64] = [
-                0xd76aa478, 0xe8c7b756, 0x242070db, 0xc1bdceee, 0xf57c0faf, 0x4787c62a, 0xa8304613,
-                0xfd469501, 0x698098d8, 0x8b44f7af, 0xffff5bb1, 0x895cd7be, 0x6b901122, 0xfd987193,
-                0xa679438e, 0x49b40821, 0xf61e2562, 0xc040b340, 0x265e5a51, 0xe9b6c7aa, 0xd62f105d,
-                0x02441453, 0xd8a1e681, 0xe7d3fbc8, 0x21e1cde6, 0xc33707d6, 0xf4d50d87, 0x455a14ed,
-                0xa9e3e905, 0xfcefa3f8, 0x676f02d9, 0x8d2a4c8a, 0xfffa3942, 0x8771f681, 0x6d9d6122,
-                0xfde5380c, 0xa4beea44, 0x4bdecfa9, 0xf6bb4b60, 0xbebfbc70, 0x289b7ec6, 0xeaa127fa,
-                0xd4ef3085, 0x04881d05, 0xd9d4d039, 0xe6db99e5, 0x1fa27cf8, 0xc4ac5665, 0xf4292244,
-                0x432aff97, 0xab9423a7, 0xfc93a039, 0x655b59c3, 0x8f0ccc92, 0xffeff47d, 0x85845dd1,
-                0x6fa87e4f, 0xfe2ce6e0, 0xa3014314, 0x4e0811a1, 0xf7537e82, 0xbd3af235, 0x2ad7d2bb,
-                0xeb86d391,
-            ];
-
-            for i in 0..64 {
-                let (f, g) = match i {
-                    0..=15 => ((bb & cc) | (!bb & dd), i),
-                    16..=31 => ((dd & bb) | (!dd & cc), (5 * i + 1) % 16),
-                    32..=47 => (bb ^ cc ^ dd, (3 * i + 5) % 16),
-                    _ => (cc ^ (bb | !dd), (7 * i) % 16),
+            for step in 0..64 {
+                let (calc_f, word_idx) = match step {
+                    0..=15 => ((acc_b & acc_c) | (!acc_b & acc_d), step),
+                    16..=31 => ((acc_d & acc_b) | (!acc_d & acc_c), (5 * step + 1) % 16),
+                    32..=47 => (acc_b ^ acc_c ^ acc_d, (3 * step + 5) % 16),
+                    _ => (acc_c ^ (acc_b | !acc_d), (7 * step) % 16),
                 };
-                let temp = dd;
-                dd = cc;
-                cc = bb;
-                bb = bb.wrapping_add(
-                    (aa.wrapping_add(f).wrapping_add(k[i]).wrapping_add(w[g])).rotate_left(s[i]),
+                let prev_d = acc_d;
+                acc_d = acc_c;
+                acc_c = acc_b;
+                acc_b = acc_b.wrapping_add(
+                    (acc_a
+                        .wrapping_add(calc_f)
+                        .wrapping_add(TABLE_K[step])
+                        .wrapping_add(words[word_idx]))
+                    .rotate_left(SHIFTS[step]),
                 );
-                aa = temp;
+                acc_a = prev_d;
             }
-            a = a.wrapping_add(aa);
-            b = b.wrapping_add(bb);
-            c = c.wrapping_add(cc);
-            d = d.wrapping_add(dd);
+            state_a = state_a.wrapping_add(acc_a);
+            state_b = state_b.wrapping_add(acc_b);
+            state_c = state_c.wrapping_add(acc_c);
+            state_d = state_d.wrapping_add(acc_d);
         }
 
-        let mut res = [0u8; 16];
-        res[0..4].copy_from_slice(&a.to_le_bytes());
-        res[4..8].copy_from_slice(&b.to_le_bytes());
-        res[8..12].copy_from_slice(&c.to_le_bytes());
-        res[12..16].copy_from_slice(&d.to_le_bytes());
-        res
+        let mut out_bytes = [0u8; 16];
+        out_bytes[0..4].copy_from_slice(&state_a.to_le_bytes());
+        out_bytes[4..8].copy_from_slice(&state_b.to_le_bytes());
+        out_bytes[8..12].copy_from_slice(&state_c.to_le_bytes());
+        out_bytes[12..16].copy_from_slice(&state_d.to_le_bytes());
+        out_bytes
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BindMode {
+    Rw,
+    Ro,
+}
+
+#[derive(Clone, Debug)]
+pub struct BoundPath {
+    pub host_path: String,
+    pub mode: BindMode,
+}
+
+#[derive(Clone)]
+pub struct PathsListWidget {
+    container: gtk4::Box,
+    list_box: gtk4::ListBox,
+    items: Rc<RefCell<Vec<BoundPath>>>,
+}
+
+impl PathsListWidget {
+    #[must_use]
+    pub fn new(parent_window: &gtk4::Window) -> Self {
+        let container = gtk4::Box::new(gtk4::Orientation::Vertical, 6);
+        let header_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+
+        let title_label = gtk4::Label::builder()
+            .label("Каталоги:")
+            .xalign(0.0)
+            .hexpand(true)
+            .build();
+        header_box.append(&title_label);
+
+        let btn_cwd = gtk4::Button::with_label("+ CWD");
+        header_box.append(&btn_cwd);
+
+        let btn_manual = gtk4::Button::with_label("+ Путь");
+        header_box.append(&btn_manual);
+
+        let btn_add = gtk4::Button::with_label("+ Обзор...");
+        header_box.append(&btn_add);
+
+        container.append(&header_box);
+
+        let list_box = gtk4::ListBox::new();
+        list_box.set_selection_mode(gtk4::SelectionMode::None);
+        list_box.add_css_class("boxed-list");
+
+        let scroll = gtk4::ScrolledWindow::builder()
+            .min_content_height(100)
+            .max_content_height(180)
+            .propagate_natural_height(true)
+            .child(&list_box)
+            .build();
+        container.append(&scroll);
+
+        let items = Rc::new(RefCell::new(Vec::new()));
+
+        let widget = Self {
+            container,
+            list_box,
+            items,
+        };
+
+        // Connect CWD button
+        let w_cwd = widget.clone();
+        btn_cwd.connect_clicked(move |_| {
+            if let Ok(cwd) = env::current_dir() {
+                w_cwd.add_path(&cwd.to_string_lossy(), BindMode::Rw);
+            }
+        });
+
+        // Connect Manual Path button
+        let w_manual = widget.clone();
+        btn_manual.connect_clicked(move |_| {
+            w_manual.add_path("", BindMode::Rw);
+        });
+
+        // Connect Add Directory button
+        let w_add = widget.clone();
+        let win_add = parent_window.clone();
+        btn_add.connect_clicked(move |_| {
+            let dlg = gtk4::FileChooserNative::builder()
+                .title("Выберите каталог для монтирования")
+                .transient_for(&win_add)
+                .action(gtk4::FileChooserAction::SelectFolder)
+                .build();
+            let w_folder = w_add.clone();
+            dlg.connect_response(move |d, response| {
+                if response == gtk4::ResponseType::Accept
+                    && let Some(f) = d.file()
+                    && let Some(path) = f.path()
+                {
+                    w_folder.add_path(&path.to_string_lossy(), BindMode::Rw);
+                }
+                d.destroy();
+            });
+            dlg.show();
+        });
+
+        widget
+    }
+
+    #[must_use]
+    pub const fn widget(&self) -> &gtk4::Box {
+        &self.container
+    }
+
+    pub fn add_path(&self, host_path: &str, mode: BindMode) {
+        let trimmed = host_path.trim();
+        let mut list = self.items.borrow_mut();
+        if !trimmed.is_empty() && list.iter().any(|item| item.host_path == trimmed) {
+            return; // Already in list
+        }
+        list.push(BoundPath {
+            host_path: trimmed.to_string(),
+            mode,
+        });
+        drop(list);
+
+        self.rebuild_rows();
+    }
+
+    fn rebuild_rows(&self) {
+        // Clear list_box
+        while let Some(child) = self.list_box.first_child() {
+            self.list_box.remove(&child);
+        }
+
+        let items_len = self.items.borrow().len();
+        for idx in 0..items_len {
+            let item = self.items.borrow()[idx].clone();
+            let row_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+            row_box.set_margin_start(6);
+            row_box.set_margin_end(6);
+            row_box.set_margin_top(4);
+            row_box.set_margin_bottom(4);
+
+            let btn_mode = gtk4::Button::with_label(if item.mode == BindMode::Rw {
+                "RW"
+            } else {
+                "RO"
+            });
+            btn_mode.set_tooltip_text(Some(
+                "Переключить режим Чтение/Запись (RW) или Только Чтение (RO)",
+            ));
+
+            let w_mode = self.clone();
+            btn_mode.connect_clicked(move |_| {
+                let mut list = w_mode.items.borrow_mut();
+                if idx < list.len() {
+                    list[idx].mode = if list[idx].mode == BindMode::Rw {
+                        BindMode::Ro
+                    } else {
+                        BindMode::Rw
+                    };
+                }
+                drop(list);
+                w_mode.rebuild_rows();
+            });
+            row_box.append(&btn_mode);
+
+            let path_entry = gtk4::Entry::new();
+            path_entry.set_text(&item.host_path);
+            path_entry.set_placeholder_text(Some("/путь/к/каталогу"));
+            path_entry.set_hexpand(true);
+
+            let w_entry = self.clone();
+            path_entry.connect_changed(move |e| {
+                let mut list = w_entry.items.borrow_mut();
+                if idx < list.len() {
+                    list[idx].host_path = e.text().to_string();
+                }
+            });
+            row_box.append(&path_entry);
+
+            let btn_del = gtk4::Button::from_icon_name("user-trash-symbolic");
+            btn_del.set_tooltip_text(Some("Удалить путь"));
+            let w_del = self.clone();
+            btn_del.connect_clicked(move |_| {
+                let mut list = w_del.items.borrow_mut();
+                if idx < list.len() {
+                    list.remove(idx);
+                }
+                drop(list);
+                w_del.rebuild_rows();
+            });
+            row_box.append(&btn_del);
+
+            self.list_box.append(&row_box);
+        }
+    }
+
+    #[must_use]
+    pub fn get_flags(&self) -> Vec<String> {
+        let mut flags = Vec::new();
+        for item in self.items.borrow().iter() {
+            let flag = if item.mode == BindMode::Rw {
+                "--rw"
+            } else {
+                "--ro"
+            };
+            flags.push(flag.to_string());
+            flags.push(item.host_path.clone());
+        }
+        flags
+    }
+
+    #[must_use]
+    pub fn to_string_args(&self) -> String {
+        let mut out = String::new();
+        for item in self.items.borrow().iter() {
+            let flag = if item.mode == BindMode::Rw {
+                "--rw"
+            } else {
+                "--ro"
+            };
+            let _ = write!(out, "{flag} \"{}\" ", item.host_path);
+        }
+        out.trim().to_string()
+    }
+
+    pub fn load_from_string_args(&self, raw: &str) {
+        let mut list = self.items.borrow_mut();
+        list.clear();
+        let tokens = parse_cli_tokens(raw);
+        let mut i = 0;
+        while i < tokens.len() {
+            if (tokens[i] == "--rw" || tokens[i] == "--ro") && i + 1 < tokens.len() {
+                let mode = if tokens[i] == "--rw" {
+                    BindMode::Rw
+                } else {
+                    BindMode::Ro
+                };
+                list.push(BoundPath {
+                    host_path: tokens[i + 1].clone(),
+                    mode,
+                });
+                i += 2;
+            } else {
+                i += 1;
+            }
+        }
+        drop(list);
+        self.rebuild_rows();
+    }
+}
+
+fn parse_cli_tokens(input_str: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut cur = String::new();
+    let mut in_quote = None;
+    for ch in input_str.chars() {
+        match in_quote {
+            Some(quote_ch) if ch == quote_ch => in_quote = None,
+            None if ch == '"' || ch == '\'' => in_quote = Some(ch),
+            None if ch.is_whitespace() => {
+                if !cur.is_empty() {
+                    tokens.push(std::mem::take(&mut cur));
+                }
+            }
+            Some(_) | None => cur.push(ch),
+        }
+    }
+    if !cur.is_empty() {
+        tokens.push(cur);
+    }
+    tokens
 }

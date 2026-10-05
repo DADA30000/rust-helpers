@@ -1,7 +1,7 @@
 [package]
 name = "system-ui-helpers"
 version = "1.0.0"
-edition = "2021"
+edition = "2024"
 
 [dependencies]
 gtk4 = "0.11"
@@ -22,6 +22,18 @@ path = "src/lib.rs"
 [[bin]]
 name = "run-exe"
 path = "src/bin/run_exe.rs"
+
+[[bin]]
+name = "sb-gui"
+path = "src/bin/sb_gui.rs"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+overflow-checks = true
 
 [[bin]]
 name = "manage-umu-shortcuts"

@@ -3,13 +3,61 @@ use std::cell::RefCell;
 use std::fs;
 use std::path::Path;
 use std::rc::Rc;
-use system_ui_helpers::*;
+use system_ui_helpers::{
+    FileChooserButton, PathsListWidget, apply_clean_theme, extract_default_icon_for_exe,
+    get_cached_icons_dir, get_xdg_data_home, load_proton_versions, open_steam_search_dialog,
+    open_zoom_preview, persist_icon, persist_icon_as, read_desktop_prop,
+    set_image_from_path_or_theme, write_desktop_props,
+};
 
-fn main() {
-    gtk4::init().expect("GTK4 init failed");
-    apply_clean_theme();
-    let main_loop = glib::MainLoop::new(None, false);
+fn populate_shortcuts(listbox: &gtk4::ListBox) {
+    while let Some(child) = listbox.first_child() {
+        listbox.remove(&child);
+    }
+    let desk_dir = get_xdg_data_home().join("applications");
+    if let Ok(entries) = fs::read_dir(desk_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with("umu-") && name.ends_with(".desktop") {
+                let path = entry.path().to_string_lossy().to_string();
+                let dname = read_desktop_prop(&path, "Name");
+                let icon_path = read_desktop_prop(&path, "Icon");
 
+                let row = gtk4::ListBoxRow::new();
+                row.set_widget_name(&format!("{dname}|{path}"));
+
+                let row_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 15);
+                row_box.set_margin_top(8);
+                row_box.set_margin_bottom(8);
+                row_box.set_margin_start(10);
+                row_box.set_margin_end(10);
+
+                let img = gtk4::Image::new();
+                set_image_from_path_or_theme(&img, &icon_path, 64);
+
+                let lbl = gtk4::Label::builder()
+                    .label(&dname)
+                    .xalign(0.0)
+                    .hexpand(true)
+                    .build();
+
+                row_box.append(&img);
+                row_box.append(&lbl);
+                row.set_child(Some(&row_box));
+                listbox.append(&row);
+            }
+        }
+    }
+}
+
+fn setup_shortcuts_window() -> (
+    gtk4::Window,
+    gtk4::SearchEntry,
+    gtk4::ListBox,
+    gtk4::Button,
+    gtk4::Button,
+    gtk4::Button,
+) {
     let win = gtk4::Window::builder()
         .title("Manage UMU Shortcuts")
         .default_width(750)
@@ -40,47 +88,96 @@ fn main() {
         .build();
     vbox.append(&scroll);
 
-    let populate = Rc::new(move |lb: &gtk4::ListBox| {
-        while let Some(child) = lb.first_child() {
-            lb.remove(&child);
-        }
-        let desk_dir = get_xdg_data_home().join("applications");
-        if let Ok(entries) = fs::read_dir(desk_dir) {
-            for entry in entries.flatten() {
-                let name = entry.file_name().to_string_lossy().to_string();
-                if name.starts_with("umu-") && name.ends_with(".desktop") {
-                    let path = entry.path().to_string_lossy().to_string();
-                    let dname = read_desktop_prop(&path, "Name");
-                    let icon_path = read_desktop_prop(&path, "Icon");
+    let bbox = gtk4::Box::new(gtk4::Orientation::Horizontal, 10);
+    bbox.set_halign(gtk4::Align::End);
+    let btn_create = gtk4::Button::with_label("Создать ярлык");
+    btn_create.add_css_class("suggested-action");
+    let btn_delete = gtk4::Button::with_label("Удалить ярлык");
+    let btn_close = gtk4::Button::with_label("Закрыть");
 
-                    let row = gtk4::ListBoxRow::new();
-                    row.set_widget_name(&format!("{}|{}", dname, path));
+    btn_create.set_focusable(false);
+    btn_create.set_can_focus(false);
+    btn_delete.set_focusable(false);
+    btn_delete.set_can_focus(false);
+    btn_close.set_focusable(false);
+    btn_close.set_can_focus(false);
 
-                    let row_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 15);
-                    row_box.set_margin_top(8);
-                    row_box.set_margin_bottom(8);
-                    row_box.set_margin_start(10);
-                    row_box.set_margin_end(10);
+    bbox.append(&btn_create);
+    bbox.append(&btn_delete);
+    bbox.append(&btn_close);
+    vbox.append(&bbox);
 
-                    let img = gtk4::Image::new();
-                    set_image_from_path_or_theme(&img, &icon_path, 64);
+    (
+        win,
+        search_entry,
+        listbox,
+        btn_create,
+        btn_delete,
+        btn_close,
+    )
+}
 
-                    let lbl = gtk4::Label::builder()
-                        .label(&dname)
-                        .xalign(0.0)
-                        .hexpand(true)
-                        .build();
-
-                    row_box.append(&img);
-                    row_box.append(&lbl);
-                    row.set_child(Some(&row_box));
-                    lb.append(&row);
+fn connect_main_actions(
+    win: &gtk4::Window,
+    listbox: &gtk4::ListBox,
+    btn_create: &gtk4::Button,
+    btn_delete: &gtk4::Button,
+    get_selected: &Rc<dyn Fn() -> Option<(String, String)>>,
+) {
+    let lb_create = listbox.clone();
+    btn_create.connect_clicked(move |_| {
+        let lb = lb_create.clone();
+        let mut child = std::process::Command::new("run-exe");
+        if let Ok(mut c) = child.spawn() {
+            glib::timeout_add_local(std::time::Duration::from_millis(500), move || {
+                match c.try_wait() {
+                    Ok(Some(_)) => {
+                        populate_shortcuts(&lb);
+                        glib::ControlFlow::Break
+                    }
+                    Ok(None) => glib::ControlFlow::Continue,
+                    Err(_) => glib::ControlFlow::Break,
                 }
-            }
+            });
         }
     });
 
-    populate(&listbox);
+    let w_del = win.clone();
+    let gs_del = Rc::clone(get_selected);
+    let lb_del = listbox.clone();
+    btn_delete.connect_clicked(move |_| {
+        if let Some((name, desk_path)) = gs_del() {
+            let dlg = gtk4::MessageDialog::builder()
+                .transient_for(&w_del)
+                .modal(true)
+                .message_type(gtk4::MessageType::Question)
+                .buttons(gtk4::ButtonsType::YesNo)
+                .text(format!(
+                    "Вы уверены, что хотите полностью удалить ярлык '{name}'?"
+                ))
+                .build();
+
+            let lb_c = lb_del.clone();
+            dlg.connect_response(move |d, response| {
+                if response == gtk4::ResponseType::Yes {
+                    fs::remove_file(&desk_path).ok();
+                    populate_shortcuts(&lb_c);
+                }
+                d.destroy();
+            });
+            dlg.present();
+        }
+    });
+}
+
+fn main() {
+    gtk4::init().expect("GTK4 init failed");
+    apply_clean_theme();
+    let main_loop = glib::MainLoop::new(None, false);
+
+    let (win, search_entry, listbox, btn_create, btn_delete, btn_close) = setup_shortcuts_window();
+
+    populate_shortcuts(&listbox);
 
     let s_clone = search_entry.clone();
     listbox.set_filter_func(move |row| {
@@ -98,26 +195,12 @@ fn main() {
         lb_filter.invalidate_filter();
     });
 
-    let bbox = gtk4::Box::new(gtk4::Orientation::Horizontal, 10);
-    bbox.set_halign(gtk4::Align::End);
-    let btn_delete = gtk4::Button::with_label("Удалить ярлык");
-    let btn_close = gtk4::Button::with_label("Закрыть");
-
-    btn_delete.set_focusable(false);
-    btn_delete.set_can_focus(false);
-    btn_close.set_focusable(false);
-    btn_close.set_can_focus(false);
-
-    bbox.append(&btn_delete);
-    bbox.append(&btn_close);
-    vbox.append(&bbox);
-
     let w_close = win.clone();
     btn_close.connect_clicked(move |_| w_close.close());
 
-    let get_selected = {
+    let get_selected: Rc<dyn Fn() -> Option<(String, String)>> = {
         let lb = listbox.clone();
-        move || -> Option<(String, String)> {
+        Rc::new(move || -> Option<(String, String)> {
             if let Some(row) = lb.selected_row() {
                 let data = row.widget_name().to_string();
                 if let Some((name, path)) = data.split_once('|') {
@@ -125,53 +208,20 @@ fn main() {
                 }
             }
             None
-        }
+        })
     };
 
     let w_edit = win.clone();
-    let gs_edit = get_selected.clone();
-    let pop_edit = populate.clone();
+    let gs_edit = Rc::clone(&get_selected);
     let lb_edit = listbox.clone();
-
     listbox.connect_row_activated(move |_, _| {
         if let Some((_, desk_path)) = gs_edit() {
-            open_edit_dialog(&w_edit, &desk_path, {
-                let p = pop_edit.clone();
-                let lb = lb_edit.clone();
-                move || p(&lb)
-            });
+            let lb = lb_edit.clone();
+            open_edit_dialog(&w_edit, &desk_path, move || populate_shortcuts(&lb));
         }
     });
 
-    let w_del = win.clone();
-    let gs_del = get_selected.clone();
-    let pop_del = populate.clone();
-    let lb_del = listbox.clone();
-    btn_delete.connect_clicked(move |_| {
-        if let Some((name, desk_path)) = gs_del() {
-            let dlg = gtk4::MessageDialog::builder()
-                .transient_for(&w_del)
-                .modal(true)
-                .message_type(gtk4::MessageType::Question)
-                .buttons(gtk4::ButtonsType::YesNo)
-                .text(format!(
-                    "Вы уверены, что хотите полностью удалить ярлык '{}'?",
-                    name
-                ))
-                .build();
-
-            let p_clone = pop_del.clone();
-            let lb_c = lb_del.clone();
-            dlg.connect_response(move |d, response| {
-                if response == gtk4::ResponseType::Yes {
-                    fs::remove_file(&desk_path).ok();
-                    p_clone(&lb_c);
-                }
-                d.destroy();
-            });
-            dlg.present();
-        }
-    });
+    connect_main_actions(&win, &listbox, &btn_create, &btn_delete, &get_selected);
 
     let ml_win = main_loop.clone();
     win.connect_close_request(move |_| {
@@ -184,109 +234,175 @@ fn main() {
     main_loop.run();
 }
 
-fn open_edit_dialog(parent: &gtk4::Window, desktop_path: &str, on_saved: impl Fn() + 'static) {
-    let dlg = gtk4::Window::builder()
-        .title("Редактирование ярлыка")
-        .default_width(580)
-        .transient_for(parent)
-        .modal(true)
-        .resizable(false)
-        .build();
+struct EditorToggles {
+    gamemode: gtk4::CheckButton,
+    mangohud: gtk4::CheckButton,
+    wayland: gtk4::CheckButton,
+    steam: gtk4::CheckButton,
+    overlay: gtk4::CheckButton,
+    vpn: gtk4::CheckButton,
+    sandbox: gtk4::CheckButton,
+    gamepad: gtk4::CheckButton,
+    network: gtk4::CheckButton,
+    steam_ports: gtk4::CheckButton,
+}
 
-    let vbox = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
-    vbox.set_margin_top(15);
-    vbox.set_margin_bottom(15);
-    vbox.set_margin_start(15);
-    vbox.set_margin_end(15);
-    dlg.set_child(Some(&vbox));
+struct EditorWidgets {
+    exe_entry: gtk4::Entry,
+    cmb_proton: gtk4::ComboBoxText,
+    toggles: EditorToggles,
+    ent_prefix: gtk4::Entry,
+    cmb_gpu: gtk4::ComboBoxText,
+    ent_name: gtk4::Entry,
+    ent_args: gtk4::Entry,
+    ent_gameid: gtk4::Entry,
+    fc_icon: FileChooserButton,
+    paths_widget: PathsListWidget,
+}
 
-    let current_name = read_desktop_prop(desktop_path, "Name");
-    let current_icon = read_desktop_prop(desktop_path, "Icon");
-    let raw_args = read_desktop_prop(desktop_path, "X-UMU-Raw-Args");
-    let actual_exe = read_desktop_prop(desktop_path, "X-UMU-Actual-Exe");
-    let prefix_name = read_desktop_prop(desktop_path, "X-UMU-Prefix-Name");
-    let gpu_select = read_desktop_prop(desktop_path, "X-UMU-GPU-Select");
-    let exec_line = read_desktop_prop(desktop_path, "Exec");
-    let proton_type = read_desktop_prop(desktop_path, "X-UMU-Proton-Type");
-    let gameid = read_desktop_prop(desktop_path, "X-UMU-Game-ID");
-
-    let title_hbox = gtk4::Box::new(gtk4::Orientation::Horizontal, 5);
-    let lbl_p = gtk4::Label::builder()
-        .label("<b>Редактирование:</b>")
-        .use_markup(true)
-        .build();
-    let lbl_f = gtk4::Label::builder()
-        .label(&format!("<b>{}</b>", current_name))
-        .use_markup(true)
-        .build();
-    title_hbox.append(&lbl_p);
-    title_hbox.append(&lbl_f);
-    vbox.append(&title_hbox);
-
-    let grid = gtk4::Grid::new();
-    grid.set_column_spacing(15);
-    grid.set_row_spacing(10);
-    vbox.append(&grid);
-
-    let exe_entry = gtk4::Entry::new();
-    exe_entry.set_text(&actual_exe);
-    exe_entry.set_hexpand(true);
-    let btn_exe_browse = gtk4::Button::with_label("Обзор...");
-    let exe_hbox = gtk4::Box::new(gtk4::Orientation::Horizontal, 5);
-    exe_hbox.append(&exe_entry);
-    exe_hbox.append(&btn_exe_browse);
-
-    let w_exe = dlg.clone();
-    let ee_c = exe_entry.clone();
-    btn_exe_browse.connect_clicked(move |_| {
-        let d = gtk4::FileChooserNative::builder()
-            .title("Выберите исполняемый файл (.exe)")
-            .transient_for(&w_exe)
-            .action(gtk4::FileChooserAction::Open)
-            .build();
-        let ec = ee_c.clone();
-        d.connect_response(move |dialog, res| {
-            if res == gtk4::ResponseType::Accept {
-                if let Some(f) = dialog.file() {
-                    ec.set_text(&f.path().unwrap().to_string_lossy());
-                }
-            }
-            dialog.destroy();
-        });
-        d.show();
-    });
-
-    let proton_versions = load_proton_versions();
-    let cmb_proton = gtk4::ComboBoxText::new();
-    for v in &proton_versions {
-        cmb_proton.append(Some(&v.name), &v.name);
+fn resolve_shortcut_icon(fc_icon: &FileChooserButton, path_hash: &str) -> String {
+    let sel_icon = fc_icon.get_filename();
+    let cache_dir_str = get_cached_icons_dir().to_string_lossy().to_string();
+    if sel_icon.starts_with(&cache_dir_str) && sel_icon.contains("umu-") {
+        persist_icon_as(&sel_icon, Some(&format!("umu-{path_hash}.png")))
+    } else {
+        persist_icon(&sel_icon)
     }
-    if !cmb_proton.set_active_id(Some(&proton_type)) {
-        cmb_proton.set_active(Some(0));
+}
+
+struct ShortcutValues<'a> {
+    name: &'a str,
+    icon: &'a str,
+    exe: &'a str,
+    args: &'a str,
+    exe_dir: &'a str,
+    prefix: &'a str,
+    gpu: &'a str,
+    proton: &'a str,
+    gameid: &'a str,
+    extra_paths: &'a str,
+}
+
+fn get_shortcut_props<'a>(
+    widgets: &'a EditorWidgets,
+    vals: &'a ShortcutValues<'a>,
+) -> [(&'static str, &'a str); 21] {
+    let bool_str = |b: bool| if b { "1" } else { "0" };
+    [
+        ("Name", vals.name),
+        ("Icon", vals.icon),
+        ("Exec", "umu-run-wrapper %k"),
+        ("Path", vals.exe_dir),
+        ("X-UMU-Actual-Exe", vals.exe),
+        ("X-UMU-Raw-Args", vals.args),
+        ("X-UMU-Prefix-Name", vals.prefix),
+        ("X-UMU-GPU-Select", vals.gpu),
+        (
+            "X-UMU-Gamemode",
+            bool_str(widgets.toggles.gamemode.is_active()),
+        ),
+        (
+            "X-UMU-Mangohud",
+            bool_str(widgets.toggles.mangohud.is_active()),
+        ),
+        (
+            "X-UMU-Wayland",
+            bool_str(widgets.toggles.wayland.is_active()),
+        ),
+        (
+            "X-UMU-Steam-Integration",
+            bool_str(widgets.toggles.steam.is_active()),
+        ),
+        (
+            "X-UMU-Steam-Overlay",
+            bool_str(widgets.toggles.overlay.is_active()),
+        ),
+        ("X-UMU-Proton-Type", vals.proton),
+        ("X-UMU-VPN", bool_str(widgets.toggles.vpn.is_active())),
+        ("X-UMU-Game-ID", vals.gameid),
+        (
+            "X-UMU-Sandbox",
+            bool_str(widgets.toggles.sandbox.is_active()),
+        ),
+        (
+            "X-UMU-Gamepad",
+            bool_str(widgets.toggles.gamepad.is_active()),
+        ),
+        (
+            "X-UMU-Network",
+            bool_str(widgets.toggles.network.is_active()),
+        ),
+        (
+            "X-UMU-Steam-Ports",
+            bool_str(widgets.toggles.steam_ports.is_active()),
+        ),
+        ("X-UMU-Extra-Paths", vals.extra_paths),
+    ]
+}
+
+fn save_shortcut_edits(
+    desktop_path: &str,
+    widgets: &EditorWidgets,
+    path_hash: &str,
+    on_saved: &dyn Fn(),
+) {
+    let mut new_name = widgets.ent_name.text().to_string();
+    let new_exe = widgets.exe_entry.text().to_string();
+    let new_icon = resolve_shortcut_icon(&widgets.fc_icon, path_hash);
+    let new_args = widgets.ent_args.text().to_string();
+
+    let extra_paths = widgets.paths_widget.to_string_args();
+    let new_prefix = widgets.ent_prefix.text().to_string();
+    let new_gpu = widgets
+        .cmb_gpu
+        .active_text()
+        .unwrap_or_default()
+        .to_string();
+    let new_proton = widgets
+        .cmb_proton
+        .active_text()
+        .unwrap_or_default()
+        .to_string();
+    let new_gameid = widgets.ent_gameid.text().to_string();
+
+    if Path::new(&new_exe).exists() && new_name.ends_with(" (Inactive)") {
+        new_name = new_name.trim_end_matches(" (Inactive)").trim().to_string();
     }
 
-    let chk_gamemode = gtk4::CheckButton::new();
-    chk_gamemode.set_active(!exec_line.contains("USE_GAMEMODE=0"));
+    let exe_dir = Path::new(&new_exe)
+        .parent()
+        .unwrap_or_else(|| Path::new(""))
+        .to_string_lossy()
+        .to_string();
 
-    let chk_mangohud = gtk4::CheckButton::new();
-    chk_mangohud.set_active(!exec_line.contains("USE_MANGOHUD=0"));
+    let vals = ShortcutValues {
+        name: &new_name,
+        icon: &new_icon,
+        exe: &new_exe,
+        args: &new_args,
+        exe_dir: &exe_dir,
+        prefix: &new_prefix,
+        gpu: &new_gpu,
+        proton: &new_proton,
+        gameid: &new_gameid,
+        extra_paths: &extra_paths,
+    };
 
-    let wayland_enabled = !exec_line.contains("PROTON_ENABLE_WAYLAND=0");
-    let chk_wayland = gtk4::CheckButton::new();
-    chk_wayland.set_active(wayland_enabled);
+    let props = get_shortcut_props(widgets, &vals);
 
-    let chk_steam = gtk4::CheckButton::new();
-    chk_steam.set_active(read_desktop_prop(desktop_path, "X-UMU-Steam-Integration") == "1");
+    write_desktop_props(desktop_path, &props);
 
-    let overlay_enabled = read_desktop_prop(desktop_path, "X-UMU-Steam-Overlay") == "1";
-    let chk_overlay = gtk4::CheckButton::new();
-    chk_overlay.set_active(overlay_enabled);
+    on_saved();
+}
 
-    let chk_vpn = gtk4::CheckButton::new();
-    chk_vpn.set_active(read_desktop_prop(desktop_path, "X-UMU-VPN") == "1");
-
+fn connect_wayland_overlay_locks(
+    chk_wayland: &gtk4::CheckButton,
+    chk_overlay: &gtk4::CheckButton,
+    wayland_enabled: bool,
+    overlay_enabled: bool,
+) {
     let lock_sig = Rc::new(RefCell::new(false));
-    let ls1 = lock_sig.clone();
+    let ls1 = Rc::clone(&lock_sig);
     let w_chk = chk_wayland.clone();
     chk_overlay.connect_toggled(move |btn| {
         if *ls1.borrow() {
@@ -302,7 +418,7 @@ fn open_edit_dialog(parent: &gtk4::Window, desktop_path: &str, on_saved: impl Fn
         *ls1.borrow_mut() = false;
     });
 
-    let ls2 = lock_sig.clone();
+    let ls2 = lock_sig;
     let o_chk = chk_overlay.clone();
     chk_wayland.connect_toggled(move |btn| {
         if *ls2.borrow() {
@@ -325,40 +441,114 @@ fn open_edit_dialog(parent: &gtk4::Window, desktop_path: &str, on_saved: impl Fn
         chk_overlay.set_active(false);
         chk_overlay.set_sensitive(false);
     }
+}
 
-    let ent_prefix = gtk4::Entry::new();
-    ent_prefix.set_text(if prefix_name.is_empty() {
-        "default"
+fn build_editor_toggles(
+    exec_line: &str,
+    desktop_path: &str,
+    sandbox_enabled: bool,
+    gamepad_enabled: bool,
+) -> EditorToggles {
+    let prop_or_exec = |key: &str, exec_match: &str, default_true: bool| {
+        let p = read_desktop_prop(desktop_path, key);
+        if !p.is_empty() {
+            p != "0"
+        } else if default_true {
+            !exec_line.contains(&format!("{exec_match}=0"))
+        } else {
+            exec_line.contains(&format!("{exec_match}=1"))
+        }
+    };
+
+    let chk_gamemode = gtk4::CheckButton::new();
+    chk_gamemode.set_active(prop_or_exec("X-UMU-Gamemode", "USE_GAMEMODE", true));
+
+    let chk_mangohud = gtk4::CheckButton::new();
+    chk_mangohud.set_active(prop_or_exec("X-UMU-Mangohud", "USE_MANGOHUD", true));
+
+    let wayland_enabled = prop_or_exec("X-UMU-Wayland", "PROTON_ENABLE_WAYLAND", true);
+    let chk_wayland = gtk4::CheckButton::new();
+    chk_wayland.set_active(wayland_enabled);
+
+    let chk_steam = gtk4::CheckButton::new();
+    chk_steam.set_active(prop_or_exec(
+        "X-UMU-Steam-Integration",
+        "USE_STEAM_INTEGRATION",
+        false,
+    ));
+
+    let overlay_enabled = prop_or_exec("X-UMU-Steam-Overlay", "USE_STEAM_OVERLAY", false);
+    let chk_overlay = gtk4::CheckButton::new();
+    chk_overlay.set_active(overlay_enabled);
+
+    let chk_vpn = gtk4::CheckButton::new();
+    chk_vpn.set_active(prop_or_exec("X-UMU-VPN", "USE_VPN", false));
+
+    let chk_sandbox = gtk4::CheckButton::new();
+    chk_sandbox.set_active(prop_or_exec(
+        "X-UMU-Sandbox",
+        "USE_SANDBOX",
+        sandbox_enabled,
+    ));
+
+    let chk_gamepad = gtk4::CheckButton::new();
+    chk_gamepad.set_active(prop_or_exec(
+        "X-UMU-Gamepad",
+        "USE_GAMEPAD",
+        gamepad_enabled,
+    ));
+
+    let network_enabled = prop_or_exec("X-UMU-Network", "USE_NETWORK", true);
+    let chk_network = gtk4::CheckButton::new();
+    chk_network.set_active(network_enabled);
+
+    let sp_prop = read_desktop_prop(desktop_path, "X-UMU-Steam-Ports");
+    let steam_ports_enabled = if sp_prop.is_empty() {
+        chk_steam.is_active()
     } else {
-        &prefix_name
-    });
+        sp_prop == "1"
+    };
+    let chk_steam_ports = gtk4::CheckButton::new();
+    chk_steam_ports.set_active(steam_ports_enabled);
 
-    let cmb_gpu = gtk4::ComboBoxText::new();
-    let gpu_opts = ["Автоматически", "AMD", "Nvidia", "Intel"];
-    for opt in gpu_opts {
-        cmb_gpu.append(Some(opt), opt);
+    connect_wayland_overlay_locks(&chk_wayland, &chk_overlay, wayland_enabled, overlay_enabled);
+
+    EditorToggles {
+        gamemode: chk_gamemode,
+        mangohud: chk_mangohud,
+        wayland: chk_wayland,
+        steam: chk_steam,
+        overlay: chk_overlay,
+        vpn: chk_vpn,
+        sandbox: chk_sandbox,
+        gamepad: chk_gamepad,
+        network: chk_network,
+        steam_ports: chk_steam_ports,
     }
-    if !cmb_gpu.set_active_id(Some(&gpu_select)) {
-        cmb_gpu.set_active(Some(0));
-    }
+}
 
-    let ent_name = gtk4::Entry::new();
-    ent_name.set_text(&current_name);
-
+fn build_icon_controls(
+    dlg: &gtk4::Window,
+    current_icon: &str,
+    actual_exe: &str,
+    exe_entry: &gtk4::Entry,
+    ent_prefix: &gtk4::Entry,
+    ent_name: &gtk4::Entry,
+    ent_gameid: &gtk4::Entry,
+) -> (FileChooserButton, gtk4::Image, gtk4::Box) {
     let img_preview = gtk4::Image::new();
     img_preview.set_pixel_size(48);
     img_preview.set_valign(gtk4::Align::Center);
-    let btn_zoom = gtk4::Button::with_label("Увеличить");
 
     let ip_cb = img_preview.clone();
-    let fc_icon = FileChooserButton::new("Выберите иконку", &dlg, move |path| {
+    let fc_icon = FileChooserButton::new("Выберите иконку", dlg, move |path| {
         set_image_from_path_or_theme(&ip_cb, &path, 48);
     });
 
     let init_icon = if current_icon.is_empty() {
         "wine"
     } else {
-        &current_icon
+        current_icon
     };
     fc_icon.set_filename(init_icon);
     set_image_from_path_or_theme(&img_preview, init_icon, 48);
@@ -371,20 +561,89 @@ fn open_edit_dialog(parent: &gtk4::Window, desktop_path: &str, on_saved: impl Fn
     icon_hbox.append(&btn_icon_search);
     icon_hbox.append(&btn_icon_reset);
 
-    let ent_args = gtk4::Entry::new();
-    ent_args.set_text(&raw_args);
-    ent_args.set_placeholder_text(Some("VAR=1 %command% --dx11"));
+    let fc_reset = fc_icon.clone();
+    let img_reset = img_preview.clone();
+    let exe_reset = exe_entry.clone();
+    let pfx_reset = ent_prefix.clone();
+    let def_exe = actual_exe.to_string();
+    btn_icon_reset.connect_clicked(move |_| {
+        let mut target = exe_reset.text().to_string();
+        if target.is_empty() || !Path::new(&target).exists() {
+            target.clone_from(&def_exe);
+        }
+        let chosen = if target.is_empty() {
+            "wine".to_string()
+        } else {
+            extract_default_icon_for_exe(&target, &pfx_reset.text())
+                .unwrap_or_else(|| "wine".to_string())
+        };
+        fc_reset.set_filename(&chosen);
+        set_image_from_path_or_theme(&img_reset, &chosen, 48);
+    });
 
-    let ent_gameid = gtk4::Entry::new();
-    ent_gameid.set_text(&gameid);
-    ent_gameid.set_placeholder_text(Some("Например: 292030 (AppID)"));
-    ent_gameid.set_hexpand(true);
+    let w_steam = dlg.clone();
+    let fc_steam = fc_icon.clone();
+    let img_steam = img_preview.clone();
+    let name_steam = ent_name.clone();
+    let gid_steam = ent_gameid.clone();
+    btn_icon_search.connect_clicked(move |_| {
+        let game_id_ent = gid_steam.clone();
+        let name_ent = name_steam.clone();
+        let fc = fc_steam.clone();
+        let img = img_steam.clone();
+        open_steam_search_dialog(&w_steam, move |game_name, appid, icon_path| {
+            game_id_ent.set_text(&appid);
+            name_ent.set_text(&game_name);
+            if let Some(ref ico) = icon_path {
+                fc.set_filename(ico);
+                set_image_from_path_or_theme(&img, ico, 48);
+            }
+        });
+    });
 
-    let btn_steam_search = gtk4::Button::with_label("Поиск в Steam");
-    let gameid_hbox = gtk4::Box::new(gtk4::Orientation::Horizontal, 5);
-    gameid_hbox.append(&ent_gameid);
-    gameid_hbox.append(&btn_steam_search);
+    (fc_icon, img_preview, icon_hbox)
+}
 
+fn build_exe_browse_hbox(dlg: &gtk4::Window, actual_exe: &str) -> (gtk4::Box, gtk4::Entry) {
+    let exe_entry = gtk4::Entry::new();
+    exe_entry.set_text(actual_exe);
+    exe_entry.set_hexpand(true);
+    let btn_exe_browse = gtk4::Button::with_label("Обзор...");
+    let exe_hbox = gtk4::Box::new(gtk4::Orientation::Horizontal, 5);
+    exe_hbox.append(&exe_entry);
+    exe_hbox.append(&btn_exe_browse);
+
+    let w_exe = dlg.clone();
+    let ee_c = exe_entry.clone();
+    btn_exe_browse.connect_clicked(move |_| {
+        let d = gtk4::FileChooserNative::builder()
+            .title("Выберите исполняемый файл (.exe)")
+            .transient_for(&w_exe)
+            .action(gtk4::FileChooserAction::Open)
+            .build();
+        let ec = ee_c.clone();
+        d.connect_response(move |dialog, res| {
+            if res == gtk4::ResponseType::Accept
+                && let Some(f) = dialog.file()
+                && let Some(p) = f.path()
+            {
+                ec.set_text(&p.to_string_lossy());
+            }
+            dialog.destroy();
+        });
+        d.show();
+    });
+
+    (exe_hbox, exe_entry)
+}
+
+struct EditorBoxes {
+    exe: gtk4::Box,
+    icon: gtk4::Box,
+    gameid: gtk4::Box,
+}
+
+fn attach_editor_rows(grid: &gtk4::Grid, widgets: &EditorWidgets, boxes: &EditorBoxes) {
     let add_row = |g: &gtk4::Grid, row: i32, title: &str, widget: &gtk4::Widget| {
         let lbl = gtk4::Label::builder()
             .label(title)
@@ -395,25 +654,302 @@ fn open_edit_dialog(parent: &gtk4::Window, desktop_path: &str, on_saved: impl Fn
         g.attach(widget, 1, row, 1, 1);
     };
 
-    add_row(&grid, 0, "Файл (.exe)", exe_hbox.upcast_ref());
-    add_row(&grid, 1, "Версия Proton", cmb_proton.upcast_ref());
-    add_row(&grid, 2, "GameMode", chk_gamemode.upcast_ref());
-    add_row(&grid, 3, "MangoHud", chk_mangohud.upcast_ref());
-    add_row(&grid, 4, "Wayland", chk_wayland.upcast_ref());
-    add_row(&grid, 5, "Интегр. Steam", chk_steam.upcast_ref());
-    add_row(&grid, 6, "Оверлей Steam", chk_overlay.upcast_ref());
-    add_row(&grid, 7, "Через VPN", chk_vpn.upcast_ref());
-    add_row(&grid, 8, "Префикс (в ~/.umu/)", ent_prefix.upcast_ref());
-    add_row(&grid, 9, "Видеокарта", cmb_gpu.upcast_ref());
-    add_row(&grid, 10, "Название", ent_name.upcast_ref());
-    add_row(&grid, 11, "Иконка (файл)", icon_hbox.upcast_ref());
-    add_row(&grid, 12, "Аргументы запуска", ent_args.upcast_ref());
-    add_row(&grid, 13, "Game ID / App ID", gameid_hbox.upcast_ref());
+    add_row(grid, 0, "Файл (.exe)", boxes.exe.upcast_ref());
+    add_row(grid, 1, "Версия Proton", widgets.cmb_proton.upcast_ref());
+    add_row(grid, 2, "GameMode", widgets.toggles.gamemode.upcast_ref());
+    add_row(grid, 3, "MangoHud", widgets.toggles.mangohud.upcast_ref());
+    add_row(grid, 4, "Wayland", widgets.toggles.wayland.upcast_ref());
+    add_row(grid, 5, "Интегр. Steam", widgets.toggles.steam.upcast_ref());
+    add_row(
+        grid,
+        6,
+        "Оверлей Steam",
+        widgets.toggles.overlay.upcast_ref(),
+    );
+    add_row(grid, 7, "Через VPN", widgets.toggles.vpn.upcast_ref());
+    add_row(
+        grid,
+        8,
+        "Префикс (в ~/.umu/)",
+        widgets.ent_prefix.upcast_ref(),
+    );
+    add_row(grid, 9, "Видеокарта", widgets.cmb_gpu.upcast_ref());
+    add_row(grid, 10, "Название", widgets.ent_name.upcast_ref());
+    add_row(grid, 11, "Иконка (файл)", boxes.icon.upcast_ref());
+    add_row(grid, 12, "Аргументы запуска", widgets.ent_args.upcast_ref());
+    add_row(grid, 13, "Game ID / App ID", boxes.gameid.upcast_ref());
+    add_row(grid, 14, "Песочница", widgets.toggles.sandbox.upcast_ref());
+    add_row(
+        grid,
+        15,
+        "Сеть песочницы",
+        widgets.toggles.network.upcast_ref(),
+    );
+    add_row(
+        grid,
+        16,
+        "Порты Steam",
+        widgets.toggles.steam_ports.upcast_ref(),
+    );
+    add_row(grid, 17, "Геймпад", widgets.toggles.gamepad.upcast_ref());
+}
 
+fn build_editor_combos(
+    proton_type: &str,
+    gpu_select: &str,
+) -> (gtk4::ComboBoxText, gtk4::ComboBoxText) {
+    let proton_versions = load_proton_versions();
+    let cmb_proton = gtk4::ComboBoxText::new();
+    for v in &proton_versions {
+        cmb_proton.append(Some(&v.name), &v.name);
+    }
+    if !cmb_proton.set_active_id(Some(proton_type)) {
+        cmb_proton.set_active(Some(0));
+    }
+
+    let cmb_gpu = gtk4::ComboBoxText::new();
+    let gpu_opts = ["Автоматически", "AMD", "Nvidia", "Intel"];
+    for opt in gpu_opts {
+        cmb_gpu.append(Some(opt), opt);
+    }
+    if !cmb_gpu.set_active_id(Some(gpu_select)) {
+        cmb_gpu.set_active(Some(0));
+    }
+
+    (cmb_proton, cmb_gpu)
+}
+
+fn connect_editor_steam_search(
+    dlg: &gtk4::Window,
+    btn_steam_search: &gtk4::Button,
+    fc_icon: &FileChooserButton,
+    img_preview: &gtk4::Image,
+    ent_name: &gtk4::Entry,
+    ent_gameid: &gtk4::Entry,
+) {
+    let w_s2 = dlg.clone();
+    let fc_s2 = fc_icon.clone();
+    let img_s2 = img_preview.clone();
+    let name_s2 = ent_name.clone();
+    let gid_s2 = ent_gameid.clone();
+    btn_steam_search.connect_clicked(move |_| {
+        let game_id_ent = gid_s2.clone();
+        let name_ent = name_s2.clone();
+        let fc = fc_s2.clone();
+        let img = img_s2.clone();
+        open_steam_search_dialog(&w_s2, move |game_name, appid, icon_path| {
+            game_id_ent.set_text(&appid);
+            name_ent.set_text(&game_name);
+            if let Some(ref ico) = icon_path {
+                fc.set_filename(ico);
+                set_image_from_path_or_theme(&img, ico, 48);
+            }
+        });
+    });
+}
+
+struct DesktopShortcutProps {
+    current_name: String,
+    current_icon: String,
+    raw_args: String,
+    actual_exe: String,
+    prefix_name: String,
+    gpu_select: String,
+    exec_line: String,
+    proton_type: String,
+    gameid: String,
+    sandbox_enabled: bool,
+    gamepad_enabled: bool,
+    extra_paths: String,
+}
+
+fn load_shortcut_props(desktop_path: &str) -> DesktopShortcutProps {
+    let current_name = read_desktop_prop(desktop_path, "Name");
+    let current_icon = read_desktop_prop(desktop_path, "Icon");
+    let raw_args = read_desktop_prop(desktop_path, "X-UMU-Raw-Args");
+    let actual_exe = read_desktop_prop(desktop_path, "X-UMU-Actual-Exe");
+    let prefix_name = read_desktop_prop(desktop_path, "X-UMU-Prefix-Name");
+    let gpu_select = read_desktop_prop(desktop_path, "X-UMU-GPU-Select");
+    let exec_line = read_desktop_prop(desktop_path, "Exec");
+    let proton_type = read_desktop_prop(desktop_path, "X-UMU-Proton-Type");
+    let gameid = read_desktop_prop(desktop_path, "X-UMU-Game-ID");
+    let sandbox_prop = read_desktop_prop(desktop_path, "X-UMU-Sandbox");
+    let gamepad_prop = read_desktop_prop(desktop_path, "X-UMU-Gamepad");
+    let extra_paths = read_desktop_prop(desktop_path, "X-UMU-Extra-Paths");
+
+    let sandbox_enabled = if sandbox_prop.is_empty() {
+        !exec_line.contains("USE_SANDBOX=0")
+    } else {
+        sandbox_prop != "0"
+    };
+
+    let gamepad_enabled = if gamepad_prop.is_empty() {
+        !exec_line.contains("USE_GAMEPAD=0")
+    } else {
+        gamepad_prop != "0"
+    };
+
+    DesktopShortcutProps {
+        current_name,
+        current_icon,
+        raw_args,
+        actual_exe,
+        prefix_name,
+        gpu_select,
+        exec_line,
+        proton_type,
+        gameid,
+        sandbox_enabled,
+        gamepad_enabled,
+        extra_paths,
+    }
+}
+
+fn build_editor_grid(
+    dlg: &gtk4::Window,
+    desktop_path: &str,
+) -> (gtk4::Grid, EditorWidgets, gtk4::Image, String) {
+    let props = load_shortcut_props(desktop_path);
+
+    let grid = gtk4::Grid::new();
+    grid.set_column_spacing(15);
+    grid.set_row_spacing(10);
+
+    let (exe_hbox, exe_entry) = build_exe_browse_hbox(dlg, &props.actual_exe);
+
+    let (cmb_proton, cmb_gpu) = build_editor_combos(&props.proton_type, &props.gpu_select);
+    let toggles = build_editor_toggles(
+        &props.exec_line,
+        desktop_path,
+        props.sandbox_enabled,
+        props.gamepad_enabled,
+    );
+
+    let ent_prefix = gtk4::Entry::new();
+    ent_prefix.set_text(if props.prefix_name.is_empty() {
+        "default"
+    } else {
+        &props.prefix_name
+    });
+
+    let ent_name = gtk4::Entry::new();
+    ent_name.set_text(&props.current_name);
+
+    let ent_gameid = gtk4::Entry::new();
+    ent_gameid.set_text(&props.gameid);
+    ent_gameid.set_placeholder_text(Some("Например: 292030 (AppID)"));
+    ent_gameid.set_hexpand(true);
+
+    let (fc_icon, img_preview, icon_hbox) = build_icon_controls(
+        dlg,
+        &props.current_icon,
+        &props.actual_exe,
+        &exe_entry,
+        &ent_prefix,
+        &ent_name,
+        &ent_gameid,
+    );
+
+    let ent_args = gtk4::Entry::new();
+    ent_args.set_text(&props.raw_args);
+    ent_args.set_placeholder_text(Some("VAR=1 %command% --dx11"));
+
+    let btn_steam_search = gtk4::Button::with_label("Поиск в Steam");
+    let gameid_hbox = gtk4::Box::new(gtk4::Orientation::Horizontal, 5);
+    gameid_hbox.append(&ent_gameid);
+    gameid_hbox.append(&btn_steam_search);
+
+    connect_editor_steam_search(
+        dlg,
+        &btn_steam_search,
+        &fc_icon,
+        &img_preview,
+        &ent_name,
+        &ent_gameid,
+    );
+
+    let paths_widget = PathsListWidget::new(dlg);
+    if !props.extra_paths.trim().is_empty() {
+        paths_widget.load_from_string_args(&props.extra_paths);
+    }
+
+    let widgets = EditorWidgets {
+        exe_entry,
+        cmb_proton,
+        toggles,
+        ent_prefix,
+        cmb_gpu,
+        ent_name,
+        ent_args,
+        ent_gameid,
+        fc_icon,
+        paths_widget,
+    };
+
+    let boxes = EditorBoxes {
+        exe: exe_hbox,
+        icon: icon_hbox,
+        gameid: gameid_hbox,
+    };
+
+    attach_editor_rows(&grid, &widgets, &boxes);
+
+    (grid, widgets, img_preview, props.current_name)
+}
+
+fn open_edit_dialog(parent: &gtk4::Window, desktop_path: &str, on_saved: impl Fn() + 'static) {
+    let dlg = gtk4::Window::builder()
+        .title("Редактирование ярлыка")
+        .default_width(580)
+        .transient_for(parent)
+        .modal(true)
+        .resizable(false)
+        .build();
+
+    let vbox = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
+    vbox.set_margin_top(15);
+    vbox.set_margin_bottom(15);
+    vbox.set_margin_start(15);
+    vbox.set_margin_end(15);
+    dlg.set_child(Some(&vbox));
+
+    let (grid, widgets, img_preview, current_name) = build_editor_grid(&dlg, desktop_path);
+
+    let title_hbox = gtk4::Box::new(gtk4::Orientation::Horizontal, 5);
+    let lbl_p = gtk4::Label::builder()
+        .label("<b>Редактирование:</b>")
+        .use_markup(true)
+        .build();
+    let lbl_f = gtk4::Label::builder()
+        .label(format!("<b>{current_name}</b>"))
+        .use_markup(true)
+        .build();
+    title_hbox.append(&lbl_p);
+    title_hbox.append(&lbl_f);
+    vbox.append(&title_hbox);
+    vbox.append(&grid);
+
+    let paths_expander = gtk4::Expander::builder()
+        .label("Дополнительные каталоги (Монтирование)")
+        .child(widgets.paths_widget.widget())
+        .build();
+    vbox.append(&paths_expander);
+
+    let btn_zoom = gtk4::Button::with_label("Увеличить");
     let preview_hbox = gtk4::Box::new(gtk4::Orientation::Horizontal, 10);
     preview_hbox.append(&img_preview);
     preview_hbox.append(&btn_zoom);
-    add_row(&grid, 14, "Предпросмотр иконки", preview_hbox.upcast_ref());
+    grid.attach(
+        &gtk4::Label::builder()
+            .label("Предпросмотр иконки")
+            .xalign(0.0)
+            .build(),
+        0,
+        16,
+        1,
+        1,
+    );
+    grid.attach(&preview_hbox, 1, 16, 1, 1);
 
     let path_hash = Path::new(desktop_path)
         .file_name()
@@ -421,84 +957,11 @@ fn open_edit_dialog(parent: &gtk4::Window, desktop_path: &str, on_saved: impl Fn
         .to_string_lossy()
         .replace("umu-", "")
         .replace(".desktop", "");
-    let def_spec = get_xdg_data_home()
-        .join("icons/umu")
-        .join(format!("umu-{}.png", path_hash));
-
-    let def_spec_clone = def_spec.clone();
-    let fc_r = fc_icon.clone();
-    let ip_r = img_preview.clone();
-    let ee_r = exe_entry.clone();
-    let ep_r = ent_prefix.clone();
-    let act_exe = actual_exe.clone();
-    btn_icon_reset.connect_clicked(move |_| {
-        let chosen_icon = if def_spec_clone.is_file()
-            && std::fs::metadata(&def_spec_clone)
-                .map(|m| m.len() > 0)
-                .unwrap_or(false)
-        {
-            def_spec_clone.to_string_lossy().to_string()
-        } else {
-            let mut target_exe = ee_r.text().to_string();
-            if target_exe.is_empty() || !Path::new(&target_exe).exists() {
-                target_exe = act_exe.clone();
-            }
-            if !target_exe.is_empty() {
-                if let Some(cached) = extract_default_icon_for_exe(&target_exe, &ep_r.text()) {
-                    cached
-                } else {
-                    "wine".to_string()
-                }
-            } else {
-                "wine".to_string()
-            }
-        };
-
-        fc_r.set_filename(&chosen_icon);
-        set_image_from_path_or_theme(&ip_r, &chosen_icon, 48);
-    });
 
     let w_zm = dlg.clone();
-    let fc_z = fc_icon.clone();
+    let fc_z = widgets.fc_icon.clone();
     btn_zoom.connect_clicked(move |_| {
         open_zoom_preview(&w_zm, &fc_z.get_filename());
-    });
-
-    let w_s_game = dlg.clone();
-    let gid_s = ent_gameid.clone();
-    let name_s = ent_name.clone();
-    let fc_s1 = fc_icon.clone();
-    let ip_s1 = img_preview.clone();
-    btn_steam_search.connect_clicked(move |_| {
-        let g = gid_s.clone();
-        let n = name_s.clone();
-        let fc = fc_s1.clone();
-        let ip = ip_s1.clone();
-        open_steam_search_dialog(&w_s_game, move |game_name, appid, icon_path| {
-            g.set_text(&appid);
-            n.set_text(&game_name);
-            if let Some(ref ico) = icon_path {
-                fc.set_filename(ico);
-                set_image_from_path_or_theme(&ip, ico, 48);
-            }
-        });
-    });
-
-    let w_s_icon = dlg.clone();
-    let name_s2 = ent_name.clone();
-    let fc_s2 = fc_icon.clone();
-    let ip_s2 = img_preview.clone();
-    btn_icon_search.connect_clicked(move |_| {
-        let n = name_s2.clone();
-        let fc = fc_s2.clone();
-        let ip = ip_s2.clone();
-        open_steam_search_dialog(&w_s_icon, move |game_name, _appid, icon_path| {
-            n.set_text(&game_name);
-            if let Some(ref ico) = icon_path {
-                fc.set_filename(ico);
-                set_image_from_path_or_theme(&ip, ico, 48);
-            }
-        });
     });
 
     let bbox = gtk4::Box::new(gtk4::Orientation::Horizontal, 10);
@@ -517,80 +980,9 @@ fn open_edit_dialog(parent: &gtk4::Window, desktop_path: &str, on_saved: impl Fn
     let d_path = desktop_path.to_string();
     let w_save = dlg.clone();
     let on_s = Rc::new(on_saved);
-    let fc_save = fc_icon.clone();
-    let p_hash = path_hash.clone();
 
     btn_save.connect_clicked(move |_| {
-        let mut new_name = ent_name.text().to_string();
-        let new_exe = exe_entry.text().to_string();
-        let sel_icon = fc_save.get_filename();
-        let cache_dir_str = get_cached_icons_dir().to_string_lossy().to_string();
-        let new_icon = if sel_icon.starts_with(&cache_dir_str) && sel_icon.contains("umu-") {
-            persist_icon_as(&sel_icon, Some(&format!("umu-{}.png", p_hash)))
-        } else {
-            persist_icon(&sel_icon)
-        };
-        let new_args = ent_args.text().to_string();
-        let new_prefix = ent_prefix.text().to_string();
-        let new_gpu = cmb_gpu.active_text().unwrap_or_default().to_string();
-        let new_proton = cmb_proton.active_text().unwrap_or_default().to_string();
-        let new_gameid = ent_gameid.text().to_string();
-
-        let env_gamemode = if chk_gamemode.is_active() { "1" } else { "0" };
-        let env_mangohud = if chk_mangohud.is_active() { "1" } else { "0" };
-        let env_wayland = if chk_wayland.is_active() { "1" } else { "0" };
-        let env_steam = if chk_steam.is_active() { "1" } else { "0" };
-        let env_overlay = if chk_overlay.is_active() { "1" } else { "0" };
-        let env_vpn = if chk_vpn.is_active() { "1" } else { "0" };
-
-        if Path::new(&new_exe).exists() && new_name.ends_with(" (Inactive)") {
-            new_name = new_name.trim_end_matches(" (Inactive)").trim().to_string();
-        }
-
-        let env_base = format!(
-            "env GAMEID={} USE_GAMEMODE={} USE_MANGOHUD={} PROTON_ENABLE_WAYLAND={} UMU_PREFIX_NAME={} UMU_PROTON_TYPE=\"{}\" USE_STEAM_INTEGRATION={} USE_STEAM_OVERLAY={} USE_VPN={} UMU_GPU_SELECT=\"{}\"",
-            new_gameid, env_gamemode, env_mangohud, env_wayland, new_prefix, new_proton, env_steam, env_overlay, env_vpn, new_gpu
-        );
-
-        let exec_cmd = if new_args.contains("%command%") {
-            let parts: Vec<&str> = new_args.splitn(2, "%command%").collect();
-            format!(
-                "{} {} umu-run-wrapper \"{}\" {}",
-                env_base,
-                parts[0].trim(),
-                new_exe,
-                parts.get(1).unwrap_or(&"").trim()
-            )
-        } else {
-            format!("{} umu-run-wrapper \"{}\" {}", env_base, new_exe, new_args.trim())
-        };
-
-        let exe_dir = Path::new(&new_exe)
-            .parent()
-            .unwrap_or_else(|| Path::new(""))
-            .to_string_lossy()
-            .to_string();
-
-        write_desktop_props(
-            &d_path,
-            &[
-                ("Name", &new_name),
-                ("Icon", &new_icon),
-                ("Exec", &exec_cmd),
-                ("Path", &exe_dir),
-                ("X-UMU-Actual-Exe", &new_exe),
-                ("X-UMU-Raw-Args", &new_args),
-                ("X-UMU-Prefix-Name", &new_prefix),
-                ("X-UMU-GPU-Select", &new_gpu),
-                ("X-UMU-Steam-Integration", env_steam),
-                ("X-UMU-Steam-Overlay", env_overlay),
-                ("X-UMU-Proton-Type", &new_proton),
-                ("X-UMU-VPN", env_vpn),
-                ("X-UMU-Game-ID", &new_gameid),
-            ],
-        );
-
-        on_s();
+        save_shortcut_edits(&d_path, &widgets, &path_hash, &*on_s);
         w_save.close();
     });
 

@@ -3,42 +3,37 @@ use std::env;
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::Duration;
-use system_ui_helpers::*;
+use system_ui_helpers::apply_clean_theme;
 
-extern "C" {
+unsafe extern "C" {
     fn getuid() -> u32;
 }
 
 fn is_prefix_running(prefix: &str) -> bool {
-    let unit = format!("umu-pfx-{}.scope", prefix);
+    let unit = format!("umu-pfx-{prefix}.scope");
     if let Ok(status) = Command::new("systemctl")
         .args(["--user", "is-active", "--quiet", &unit])
         .status()
+        && status.success()
     {
-        if status.success() {
-            return true;
-        }
+        return true;
     }
 
     // Secondary check: is overlay mounted in runtime dir?
     let uid = unsafe { getuid() };
-    let mount_dir = env::var("XDG_RUNTIME_DIR")
-        .unwrap_or_else(|_| format!("/run/user/{}", uid));
-    let pfx_mount = format!("{}/umu-pfx/{}", mount_dir, prefix);
-    if let Ok(status) = Command::new("mountpoint")
-        .args(["-q", &pfx_mount])
-        .status()
+    let mount_dir = env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| format!("/run/user/{uid}"));
+    let pfx_mount = format!("{mount_dir}/umu-pfx/{prefix}");
+    if let Ok(status) = Command::new("mountpoint").args(["-q", &pfx_mount]).status()
+        && status.success()
     {
-        if status.success() {
-            return true;
-        }
+        return true;
     }
 
     false
 }
 
 fn stop_prefix(prefix: &str) {
-    let unit = format!("umu-pfx-{}.scope", prefix);
+    let unit = format!("umu-pfx-{prefix}.scope");
     Command::new("systemctl")
         .args(["--user", "stop", &unit])
         .status()
@@ -54,9 +49,8 @@ fn stop_prefix(prefix: &str) {
 
     // Secondary fallback cleanup if still mounted
     let uid = unsafe { getuid() };
-    let mount_dir = env::var("XDG_RUNTIME_DIR")
-        .unwrap_or_else(|_| format!("/run/user/{}", uid));
-    let pfx_mount = format!("{}/umu-pfx/{}", mount_dir, prefix);
+    let mount_dir = env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| format!("/run/user/{uid}"));
+    let pfx_mount = format!("{mount_dir}/umu-pfx/{prefix}");
     Command::new("umount")
         .args(["-l", &pfx_mount])
         .stdout(Stdio::null())
@@ -96,9 +90,8 @@ fn main() {
     win.set_child(Some(&vbox));
 
     let lbl_msg = gtk4::Label::builder()
-        .label(&format!(
-            "<b>Префикс '{}' сейчас работает!</b>\n\nВ данный момент префикс используется другим процессом.\nВы можете принудительно завершить его или прервать текущий запуск.",
-            prefix
+        .label(format!(
+            "<b>Префикс '{prefix}' сейчас работает!</b>\n\nВ данный момент префикс используется другим процессом.\nВы можете принудительно завершить его или прервать текущий запуск."
         ))
         .use_markup(true)
         .xalign(0.0)
@@ -120,11 +113,14 @@ fn main() {
     vbox.append(&bbox);
 
     let _ml_stop = main_loop.clone();
-    let p_stop = prefix.clone();
+    let p_stop = prefix;
     btn_stop.connect_clicked(move |_| {
         stop_prefix(&p_stop);
         Command::new("notify-send")
-            .args(["Префикс закрыт", &format!("Работа префикса '{}' завершена", p_stop)])
+            .args([
+                "Префикс закрыт",
+                &format!("Работа префикса '{p_stop}' завершена"),
+            ])
             .spawn()
             .ok();
         // Exit 0 allows wrapper to continue and start fresh instance

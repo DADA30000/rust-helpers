@@ -464,7 +464,7 @@ impl UmuOptionsWidget {
         let ent_name = gtk4::Entry::new();
         ent_name.set_text(&data.name);
 
-        let (fc_icon, img_preview, icon_hbox, preview_hbox, btn_icon_search) =
+        let (fc_icon, img_preview, icon_hbox, preview_hbox) =
             Self::build_icon_rows(parent_window, &data.icon, &exe_entry, &ent_prefix);
 
         let ent_args = gtk4::Entry::new();
@@ -480,10 +480,7 @@ impl UmuOptionsWidget {
             &fc_icon,
             &img_preview,
         );
-        let sh1 = Rc::clone(&search_handler);
-        btn_steam_search.connect_clicked(move |_| sh1());
-        let sh2 = Rc::clone(&search_handler);
-        btn_icon_search.connect_clicked(move |_| sh2());
+        btn_steam_search.connect_clicked(move |_| search_handler());
 
         attach_grid_row(&grid, 0, "Файл (.exe)", exe_hbox.upcast_ref());
         attach_grid_row(&grid, 1, "Версия Proton", cmb_proton.upcast_ref());
@@ -623,13 +620,7 @@ impl UmuOptionsWidget {
         current_icon: &str,
         exe_entry: &gtk4::Entry,
         ent_prefix: &gtk4::Entry,
-    ) -> (
-        FileChooserButton,
-        gtk4::Image,
-        gtk4::Box,
-        gtk4::Box,
-        gtk4::Button,
-    ) {
+    ) -> (FileChooserButton, gtk4::Image, gtk4::Box, gtk4::Box) {
         let img_preview = gtk4::Image::new();
         img_preview.set_pixel_size(48);
         img_preview.set_valign(gtk4::Align::Center);
@@ -641,12 +632,10 @@ impl UmuOptionsWidget {
         fc_icon.set_filename(current_icon);
         set_image_from_path_or_theme(&img_preview, current_icon, 48);
 
-        let btn_icon_search = gtk4::Button::with_label("Поиск в Steam");
         let btn_icon_reset = gtk4::Button::with_label("Сбросить");
 
         let icon_hbox = gtk4::Box::new(gtk4::Orientation::Horizontal, 5);
         icon_hbox.append(fc_icon.widget());
-        icon_hbox.append(&btn_icon_search);
         icon_hbox.append(&btn_icon_reset);
 
         let btn_zoom = gtk4::Button::with_label("Увеличить");
@@ -672,13 +661,7 @@ impl UmuOptionsWidget {
             set_image_from_path_or_theme(&img_reset, &target_icon, 48);
         });
 
-        (
-            fc_icon,
-            img_preview,
-            icon_hbox,
-            preview_hbox,
-            btn_icon_search,
-        )
+        (fc_icon, img_preview, icon_hbox, preview_hbox)
     }
 
     fn build_gameid_row(initial_gameid: &str) -> (gtk4::Box, gtk4::Entry, gtk4::Button) {

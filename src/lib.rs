@@ -14,6 +14,9 @@ use std::process::Command;
 use std::rc::Rc;
 use std::thread;
 
+pub mod shortcut_editor;
+pub use shortcut_editor::*;
+
 struct TempDir(PathBuf);
 
 impl TempDir {
@@ -965,9 +968,6 @@ impl PathsListWidget {
             .build();
         header_box.append(&title_label);
 
-        let btn_cwd = gtk4::Button::with_label("+ CWD");
-        header_box.append(&btn_cwd);
-
         let btn_manual = gtk4::Button::with_label("+ Путь");
         header_box.append(&btn_manual);
 
@@ -982,10 +982,10 @@ impl PathsListWidget {
 
         let scroll = gtk4::ScrolledWindow::builder()
             .min_content_height(100)
-            .max_content_height(180)
-            .propagate_natural_height(true)
+            .vexpand(true)
             .child(&list_box)
             .build();
+        container.set_vexpand(true);
         container.append(&scroll);
 
         let items = Rc::new(RefCell::new(Vec::new()));
@@ -995,14 +995,6 @@ impl PathsListWidget {
             list_box,
             items,
         };
-
-        // Connect CWD button
-        let w_cwd = widget.clone();
-        btn_cwd.connect_clicked(move |_| {
-            if let Ok(cwd) = env::current_dir() {
-                w_cwd.add_path(&cwd.to_string_lossy(), BindMode::Rw);
-            }
-        });
 
         // Connect Manual Path button
         let w_manual = widget.clone();
@@ -1149,7 +1141,8 @@ impl PathsListWidget {
             } else {
                 "--ro"
             };
-            let _ = write!(out, "{flag} \"{}\" ", item.host_path);
+            let escaped = item.host_path.replace('"', "\\\"");
+            let _ = write!(out, "{flag} \"{escaped}\" ");
         }
         out.trim().to_string()
     }
@@ -1184,7 +1177,17 @@ fn parse_cli_tokens(input_str: &str) -> Vec<String> {
     let mut tokens = Vec::new();
     let mut cur = String::new();
     let mut in_quote = None;
+    let mut escaped = false;
     for ch in input_str.chars() {
+        if escaped {
+            cur.push(ch);
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            continue;
+        }
         match in_quote {
             Some(quote_ch) if ch == quote_ch => in_quote = None,
             None if ch == '"' || ch == '\'' => in_quote = Some(ch),

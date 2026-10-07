@@ -207,6 +207,10 @@ pub fn resolve_actual_exe_from_lnk(target_exe: &str, prefix_name: &str) -> (Stri
 ///
 /// # Errors
 ///
+/// Saves the UMU configuration into a `.desktop` file.
+///
+/// # Errors
+///
 /// Returns an [`io::Error`] if creating directories or writing the desktop entry fails.
 pub fn save_shortcut_to_desktop(
     data: &UmuShortcutData,
@@ -248,7 +252,7 @@ pub fn save_shortcut_to_desktop(
         .to_string();
 
     let bool_str = |b: bool| if b { "1" } else { "0" };
-
+    let use_steam_ports = data.steam.steam || data.display.overlay;
     let net_val = match data.network_mode.as_str() {
         "off" => "0",
         "passthrough" => "1",
@@ -256,12 +260,12 @@ pub fn save_shortcut_to_desktop(
         _ => "sandboxed",
     };
 
-    let use_steam_ports = data.steam.steam || data.display.overlay;
+    let exec_cmd = format!("umu-run-wrapper \"{}\"", target_desktop.to_string_lossy());
 
     let props = [
         ("Type", "Application"),
         ("Name", data.name.as_str()),
-        ("Exec", "umu-run-wrapper %k"),
+        ("Exec", exec_cmd.as_str()),
         ("Icon", final_icon.as_str()),
         ("Path", exe_dir.as_str()),
         ("Terminal", "false"),

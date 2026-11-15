@@ -120,27 +120,27 @@ fn load_sandbox_from_desktop(
     let sec_allow = read_str("X-UMU-Seccomp-Allow");
     let sec_block = read_str("X-UMU-Seccomp-Block");
     if !sec_allow.is_empty() || !sec_block.is_empty() {
-        let allow_set: HashSet<&str> = sec_allow
+        let block_set: HashSet<&str> = sec_block
             .split(',')
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .collect();
-        let mut blocked: Vec<String> = decl
-            .default_blocked
+        let mut allowed: Vec<String> = decl
+            .default_allowed
             .iter()
-            .filter(|s| !allow_set.contains(s.as_str()))
+            .filter(|s| !block_set.contains(s.as_str()))
             .cloned()
             .collect();
-        for item in sec_block
+        for item in sec_allow
             .split(',')
             .map(str::trim)
             .filter(|s| !s.is_empty())
         {
-            if !allow_set.contains(item) && !blocked.iter().any(|b| b == item) {
-                blocked.push(item.to_string());
+            if !block_set.contains(item) && !allowed.iter().any(|a| a == item) {
+                allowed.push(item.to_string());
             }
         }
-        sb.seccomp_blocked = blocked;
+        sb.seccomp_allowed = allowed;
     }
 
     let bridges_raw = read_str("X-UMU-Bridges");

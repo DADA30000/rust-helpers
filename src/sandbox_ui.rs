@@ -49,7 +49,7 @@ struct SbDefaultsRaw {
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct SbSeccompDefaults {
-    pub default_blocked: Vec<String>,
+    pub default_allowed: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -66,7 +66,7 @@ pub struct SbRunConfig {
     pub defaults: SbDefaults,
     pub singbox_config: String,
     pub neovide_bin: String,
-    pub default_blocked: Vec<String>,
+    pub default_allowed: Vec<String>,
     pub syscalls: BTreeSet<String>,
 }
 
@@ -239,7 +239,7 @@ impl SbRunConfig {
             defaults,
             singbox_config: parsed.singbox_config,
             neovide_bin,
-            default_blocked: parsed.seccomp.default_blocked,
+            default_allowed: parsed.seccomp.default_allowed,
             syscalls,
         })
     }
@@ -297,7 +297,7 @@ pub struct SandboxFormData {
     pub hw: SandboxHwFlags,
     pub sec: SandboxSecurityFlags,
     pub runtime: SandboxRuntimeFlags,
-    pub seccomp_blocked: Vec<String>,
+    pub seccomp_allowed: Vec<String>,
     pub bridges: Vec<String>,
     pub bwrap_args: String,
     pub extra_env: String,
@@ -322,7 +322,7 @@ impl SandboxFormData {
             hw: decl.defaults.hw,
             sec: decl.defaults.sec,
             runtime: decl.defaults.runtime,
-            seccomp_blocked: decl.default_blocked.clone(),
+            seccomp_allowed: decl.default_allowed.clone(),
             bridges: Vec::new(),
             bwrap_args: String::new(),
             extra_env: String::new(),
@@ -332,7 +332,7 @@ impl SandboxFormData {
 
     #[must_use]
     pub fn umu_defaults(decl: &SbRunConfig) -> Self {
-        let umu_allows: HashSet<&str> = [
+        let umu_allows = [
             "unshare",
             "setns",
             "mount",
@@ -340,7 +340,6 @@ impl SandboxFormData {
             "umount2",
             "pivot_root",
             "chroot",
-            "clone3",
             "open_tree",
             "move_mount",
             "fsopen",
@@ -348,40 +347,43 @@ impl SandboxFormData {
             "fsmount",
             "fspick",
             "mount_setattr",
+            "clone_newuser",
             "ptrace",
             "process_vm_readv",
             "process_vm_writev",
             "modify_ldt",
             "personality",
-        ]
-        .into_iter()
-        .collect();
+            "userfaultfd",
+        ];
 
         let mut data = Self::from_decl(decl);
         data.x11 = "passthrough".into();
         data.hw.gpu = true;
         data.sec.landlock = false;
         data.runtime.tmpfs = false;
-        data.seccomp_blocked
-            .retain(|s| !umu_allows.contains(s.as_str()));
+        for s in umu_allows {
+            if !data.seccomp_allowed.iter().any(|x| x == s) {
+                data.seccomp_allowed.push(s.to_string());
+            }
+        }
         data
     }
 
     #[must_use]
     pub fn seccomp_diff(&self, decl: &SbRunConfig) -> (Vec<String>, Vec<String>) {
-        let def_set: HashSet<&str> = decl.default_blocked.iter().map(String::as_str).collect();
-        let cur_set: HashSet<&str> = self.seccomp_blocked.iter().map(String::as_str).collect();
+        let def_set: HashSet<&str> = decl.default_allowed.iter().map(String::as_str).collect();
+        let cur_set: HashSet<&str> = self.seccomp_allowed.iter().map(String::as_str).collect();
 
-        let allow: Vec<String> = decl
-            .default_blocked
-            .iter()
-            .filter(|s| !cur_set.contains(s.as_str()))
-            .cloned()
-            .collect();
-        let block: Vec<String> = self
-            .seccomp_blocked
+        let allow: Vec<String> = self
+            .seccomp_allowed
             .iter()
             .filter(|s| !def_set.contains(s.as_str()))
+            .cloned()
+            .collect();
+        let block: Vec<String> = decl
+            .default_allowed
+            .iter()
+            .filter(|s| !cur_set.contains(s.as_str()))
             .cloned()
             .collect();
         (allow, block)
@@ -757,7 +759,7 @@ fn build_seccomp_add_row(
     #[allow(deprecated)]
     ent_sys.set_completion(Some(&completion));
 
-    let btn_add = gtk4::Button::with_label("+ Заблокировать");
+    let btn_add = gtk4::Button::with_label("+ Разрешить");
     add_box.append(&ent_sys);
     add_box.append(&btn_add);
 
@@ -799,7 +801,7 @@ fn open_seccomp_editor_dialog(
     default_preset: &[String],
 ) {
     let dlg = gtk4::Window::builder()
-        .title("Настройка Seccomp (заблокированные syscalls)")
+        .title("Настройка Seccomp (разрешенные syscalls)")
         .default_width(520)
         .default_height(520)
         .transient_for(parent)
@@ -814,7 +816,7 @@ fn open_seccomp_editor_dialog(
     dlg.set_child(Some(&vbox));
 
     let search = gtk4::SearchEntry::builder()
-        .placeholder_text("Поиск среди заблокированных...")
+        .placeholder_text("Поиск среди разрешенных...")
         .build();
     vbox.append(&search);
 
@@ -977,7 +979,7 @@ pub struct SandboxOptionsWidget {
     pub toggle_landlock: gtk4::CheckButton,
     pub toggle_seccomp: gtk4::CheckButton,
     pub btn_seccomp_edit: gtk4::Button,
-    pub seccomp_blocked: Rc<RefCell<Vec<String>>>,
+    pub seccomp_allowed: Rc<RefCell<Vec<String>>>,
     pub toggle_tmpfs: gtk4::CheckButton,
     pub toggle_share_pid: gtk4::CheckButton,
     pub toggle_vpnify: gtk4::CheckButton,
@@ -1193,7 +1195,7 @@ struct AdvWidgets {
     toggle_landlock: gtk4::CheckButton,
     toggle_seccomp: gtk4::CheckButton,
     btn_seccomp_edit: gtk4::Button,
-    seccomp_blocked: Rc<RefCell<Vec<String>>>,
+    seccomp_allowed: Rc<RefCell<Vec<String>>>,
     toggle_tmpfs: gtk4::CheckButton,
     toggle_share_pid: gtk4::CheckButton,
     toggle_vpnify: gtk4::CheckButton,
@@ -1239,9 +1241,9 @@ fn build_seccomp_controls(
     let seccomp_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
     let chk_seccomp = gtk4::CheckButton::with_label("Seccomp фильтр");
     chk_seccomp.set_active(init.sec.seccomp);
-    let seccomp_blocked = Rc::new(RefCell::new(init.seccomp_blocked.clone()));
+    let seccomp_allowed = Rc::new(RefCell::new(init.seccomp_allowed.clone()));
     let btn_seccomp_edit =
-        gtk4::Button::with_label(&format!("Syscalls ({})...", init.seccomp_blocked.len()));
+        gtk4::Button::with_label(&format!("Syscalls ({})...", init.seccomp_allowed.len()));
     btn_seccomp_edit.set_sensitive(init.sec.seccomp);
     seccomp_box.append(&chk_seccomp);
     seccomp_box.append(&btn_seccomp_edit);
@@ -1250,19 +1252,19 @@ fn build_seccomp_controls(
     chk_seccomp.connect_toggled(move |c| b_btn.set_sensitive(c.is_active()));
 
     let preset_defaults = if mode == SandboxUiMode::Umu {
-        SandboxFormData::umu_defaults(decl).seccomp_blocked
+        SandboxFormData::umu_defaults(decl).seccomp_allowed
     } else {
-        decl.default_blocked.clone()
+        decl.default_allowed.clone()
     };
     let w_sec = parent.clone();
     let d_sec = decl.clone();
-    let blk_sec = Rc::clone(&seccomp_blocked);
+    let blk_sec = Rc::clone(&seccomp_allowed);
     let b_sec_lbl = btn_seccomp_edit.clone();
     btn_seccomp_edit.connect_clicked(move |_| {
         open_seccomp_editor_dialog(&w_sec, &d_sec, &blk_sec, &b_sec_lbl, &preset_defaults);
     });
 
-    (seccomp_box, chk_seccomp, btn_seccomp_edit, seccomp_blocked)
+    (seccomp_box, chk_seccomp, btn_seccomp_edit, seccomp_allowed)
 }
 
 struct AdvGridControls {
@@ -1366,7 +1368,7 @@ fn build_adv_section(
     let g = build_adv_toggles_grid(mode, init);
     let adv_grid = g.grid;
 
-    let (seccomp_box, chk_seccomp, btn_seccomp_edit, seccomp_blocked) =
+    let (seccomp_box, chk_seccomp, btn_seccomp_edit, seccomp_allowed) =
         build_seccomp_controls(parent, decl, mode, init);
     adv_grid.attach(&seccomp_box, 0, 4, 2, 1);
 
@@ -1406,7 +1408,7 @@ fn build_adv_section(
         toggle_landlock: g.toggle_landlock,
         toggle_seccomp: chk_seccomp,
         btn_seccomp_edit,
-        seccomp_blocked,
+        seccomp_allowed,
         toggle_tmpfs: g.toggle_tmpfs,
         toggle_share_pid: g.toggle_share_pid,
         toggle_vpnify: g.toggle_vpnify,
@@ -1488,7 +1490,7 @@ impl SandboxOptionsWidget {
             toggle_landlock: adv.toggle_landlock,
             toggle_seccomp: adv.toggle_seccomp,
             btn_seccomp_edit: adv.btn_seccomp_edit,
-            seccomp_blocked: adv.seccomp_blocked,
+            seccomp_allowed: adv.seccomp_allowed,
             toggle_tmpfs: adv.toggle_tmpfs,
             toggle_share_pid: adv.toggle_share_pid,
             toggle_vpnify: adv.toggle_vpnify,
@@ -1546,7 +1548,7 @@ impl SandboxOptionsWidget {
                 share_pid: self.toggle_share_pid.is_active(),
                 vpnify: self.toggle_vpnify.is_active(),
             },
-            seccomp_blocked: self.seccomp_blocked.borrow().clone(),
+            seccomp_allowed: self.seccomp_allowed.borrow().clone(),
             bridges: self.bridges_widget.get_rules(),
             bwrap_args: self.entry_bwrap.text().to_string(),
             extra_env: self.entry_env.text().to_string(),
@@ -1570,9 +1572,9 @@ impl SandboxOptionsWidget {
         self.toggle_portals.set_active(data.sec.portals);
         self.toggle_landlock.set_active(data.sec.landlock);
         self.toggle_seccomp.set_active(data.sec.seccomp);
-        (*self.seccomp_blocked.borrow_mut()).clone_from(&data.seccomp_blocked);
+        (*self.seccomp_allowed.borrow_mut()).clone_from(&data.seccomp_allowed);
         self.btn_seccomp_edit
-            .set_label(&format!("Syscalls ({})...", data.seccomp_blocked.len()));
+            .set_label(&format!("Syscalls ({})...", data.seccomp_allowed.len()));
         self.toggle_tmpfs.set_active(data.runtime.tmpfs);
         self.toggle_share_pid.set_active(data.runtime.share_pid);
         self.toggle_vpnify.set_active(data.runtime.vpnify);
@@ -1686,19 +1688,19 @@ impl SandboxOptionsWidget {
 }
 
 #[must_use]
-pub fn format_seccomp_summary(blocked: &[String], decl: &SbRunConfig) -> String {
+pub fn format_seccomp_summary(allowed: &[String], decl: &SbRunConfig) -> String {
     let mut s = String::new();
-    let def_set: HashSet<&str> = decl.default_blocked.iter().map(String::as_str).collect();
-    let cur_set: HashSet<&str> = blocked.iter().map(String::as_str).collect();
-    let allow: Vec<&str> = decl
-        .default_blocked
-        .iter()
-        .filter(|x| !cur_set.contains(x.as_str()))
-        .map(String::as_str)
-        .collect();
-    let block: Vec<&str> = blocked
+    let def_set: HashSet<&str> = decl.default_allowed.iter().map(String::as_str).collect();
+    let cur_set: HashSet<&str> = allowed.iter().map(String::as_str).collect();
+    let allow: Vec<&str> = allowed
         .iter()
         .filter(|x| !def_set.contains(x.as_str()))
+        .map(String::as_str)
+        .collect();
+    let block: Vec<&str> = decl
+        .default_allowed
+        .iter()
+        .filter(|x| !cur_set.contains(x.as_str()))
         .map(String::as_str)
         .collect();
     let _ = write!(s, "allow={} block={}", allow.join(","), block.join(","));

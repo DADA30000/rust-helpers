@@ -1,6 +1,6 @@
 use gtk4::prelude::*;
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fmt::Write;
 use std::fs;
@@ -10,9 +10,10 @@ use std::process::Command;
 use std::rc::Rc;
 
 use crate::{
-    FileChooserButton, PathsListWidget, extract_default_icon_for_exe, get_default_proton_name,
-    get_xdg_data_home, load_proton_versions, open_steam_search_dialog, open_zoom_preview,
-    persist_icon, read_desktop_prop, set_image_from_path_or_theme,
+    FileChooserButton, SandboxFormData, SandboxOptionsWidget, SandboxUiMode, SbRunConfig,
+    extract_default_icon_for_exe, get_default_proton_name, get_xdg_data_home, load_proton_versions,
+    open_steam_search_dialog, open_zoom_preview, persist_icon, read_desktop_prop,
+    set_image_from_path_or_theme,
 };
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -67,10 +68,97 @@ pub struct UmuShortcutData {
     pub network_mode: String,
     pub extra_paths: String,
     pub lnk_path: String,
+    pub sandbox: Option<SandboxFormData>,
+}
+
+fn load_sandbox_from_desktop(
+    desktop_path: &str,
+    decl: &SbRunConfig,
+    network_mode: &str,
+    xwayland_mode: &str,
+    gamepad: bool,
+    extra_paths: &str,
+) -> SandboxFormData {
+    let mut sb = SandboxFormData::umu_defaults(decl);
+    sb.network = network_mode.to_string();
+    sb.x11 = xwayland_mode.to_string();
+    sb.hw.gamepad = gamepad;
+    sb.extra_paths = extra_paths.to_string();
+
+    let read_str = |key: &str| read_desktop_prop(desktop_path, key);
+    let read_bool = |key: &str, def: bool| -> bool {
+        let v = read_str(key);
+        if v.is_empty() { def } else { v != "0" }
+    };
+
+    let singbox_cfg = read_str("X-UMU-Singbox-Config");
+    if !singbox_cfg.is_empty() {
+        sb.singbox_config = singbox_cfg;
+    }
+    for (key, field) in [
+        ("X-UMU-Pulse", &mut sb.pulse),
+        ("X-UMU-Pipewire", &mut sb.pipewire),
+        ("X-UMU-Webcam", &mut sb.webcam),
+        ("X-UMU-DBus", &mut sb.dbus),
+        ("X-UMU-SHM", &mut sb.shm),
+        ("X-UMU-Tmp", &mut sb.tmp),
+    ] {
+        let val = read_str(key);
+        if !val.is_empty() {
+            *field = val;
+        }
+    }
+
+    sb.hw.gpu = read_bool("X-UMU-GPU", sb.hw.gpu);
+    sb.sec.landlock = read_bool("X-UMU-Landlock", sb.sec.landlock);
+    sb.sec.seccomp = read_bool("X-UMU-Seccomp", sb.sec.seccomp);
+    sb.sec.portals = read_bool("X-UMU-Portals", sb.sec.portals);
+    sb.runtime.share_pid = read_bool("X-UMU-Share-Pid", sb.runtime.share_pid);
+    sb.runtime.tmpfs = read_bool("X-UMU-Tmpfs", sb.runtime.tmpfs);
+    sb.runtime.vpnify = read_bool("X-UMU-Vpnify", sb.runtime.vpnify);
+
+    let sec_allow = read_str("X-UMU-Seccomp-Allow");
+    let sec_block = read_str("X-UMU-Seccomp-Block");
+    if !sec_allow.is_empty() || !sec_block.is_empty() {
+        let allow_set: HashSet<&str> = sec_allow
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .collect();
+        let mut blocked: Vec<String> = decl
+            .default_blocked
+            .iter()
+            .filter(|s| !allow_set.contains(s.as_str()))
+            .cloned()
+            .collect();
+        for item in sec_block
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            if !allow_set.contains(item) && !blocked.iter().any(|b| b == item) {
+                blocked.push(item.to_string());
+            }
+        }
+        sb.seccomp_blocked = blocked;
+    }
+
+    let bridges_raw = read_str("X-UMU-Bridges");
+    if !bridges_raw.is_empty() {
+        sb.bridges = bridges_raw
+            .split_whitespace()
+            .map(ToString::to_string)
+            .collect();
+    }
+    sb.dbus_args = read_str("X-UMU-DBus-Args");
+    sb.bwrap_args = read_str("X-UMU-Bwrap-Args");
+    sb.extra_env = read_str("X-UMU-Env");
+    sb
 }
 
 #[must_use]
 pub fn load_shortcut_from_desktop(desktop_path: &str) -> UmuShortcutData {
+    let decl = SbRunConfig::load_or_exit();
     let current_name = read_desktop_prop(desktop_path, "Name");
     let current_icon = read_desktop_prop(desktop_path, "Icon");
     let actual_exe = read_desktop_prop(desktop_path, "X-UMU-Actual-Exe");
@@ -104,10 +192,10 @@ pub fn load_shortcut_from_desktop(desktop_path: &str) -> UmuShortcutData {
     let gamepad = prop_or_exec("X-UMU-Gamepad", "USE_GAMEPAD", false);
 
     let x11_prop = read_desktop_prop(desktop_path, "X-UMU-X11");
-    let xwayland_mode = if x11_prop == "sandboxed" {
-        "sandboxed".to_string()
-    } else {
-        "passthrough".to_string()
+    let xwayland_mode = match x11_prop.as_str() {
+        "sandboxed" => "sandboxed".to_string(),
+        "off" => "off".to_string(),
+        _ => "passthrough".to_string(),
     };
 
     let net_prop = read_desktop_prop(desktop_path, "X-UMU-Network");
@@ -125,6 +213,15 @@ pub fn load_shortcut_from_desktop(desktop_path: &str) -> UmuShortcutData {
             _ => "sandboxed".to_string(),
         }
     };
+
+    let sb_data = load_sandbox_from_desktop(
+        desktop_path,
+        &decl,
+        &network_mode,
+        &xwayland_mode,
+        gamepad,
+        &extra_paths,
+    );
 
     UmuShortcutData {
         name: current_name,
@@ -162,6 +259,7 @@ pub fn load_shortcut_from_desktop(desktop_path: &str) -> UmuShortcutData {
         network_mode,
         extra_paths,
         lnk_path,
+        sandbox: Some(sb_data),
     }
 }
 
@@ -203,53 +301,38 @@ pub fn resolve_actual_exe_from_lnk(target_exe: &str, prefix_name: &str) -> (Stri
     (actual_exe, lnk_arg)
 }
 
-/// Saves the UMU configuration into a `.desktop` file.
-///
-/// # Errors
-///
-/// Saves the UMU configuration into a `.desktop` file.
-///
-/// # Errors
-///
-/// Returns an [`io::Error`] if creating directories or writing the desktop entry fails.
-pub fn save_shortcut_to_desktop(
-    data: &UmuShortcutData,
-    dest_path: Option<&str>,
-) -> io::Result<PathBuf> {
-    let desktop_dir = get_xdg_data_home().join("applications");
-    fs::create_dir_all(&desktop_dir)?;
-    let icon_dir = get_xdg_data_home().join("icons/umu");
-    fs::create_dir_all(&icon_dir)?;
-
-    let (actual_exe, lnk_path) = if data.exe.to_lowercase().ends_with(".lnk") {
-        resolve_actual_exe_from_lnk(&data.exe, &data.prefix)
-    } else {
-        (data.exe.clone(), data.lnk_path.clone())
-    };
-
-    let digest = crate::md5::compute(format!("{}{}", actual_exe, data.args).as_bytes());
-    let mut hash_hex = String::with_capacity(32);
-    for byte in digest {
-        let _ = write!(hash_hex, "{byte:02x}");
+fn write_desktop_entry_file(target_desktop: &Path, props: &[(&str, &str)]) -> io::Result<()> {
+    let mut desktop_content = String::from("[Desktop Entry]\n");
+    for (k, v) in props {
+        let _ = writeln!(desktop_content, "{k}={v}");
     }
-    let hash_8 = hash_hex[..8].to_string();
+    fs::write(target_desktop, &desktop_content)?;
 
-    let target_desktop = dest_path.map_or_else(
-        || desktop_dir.join(format!("umu-{hash_8}.desktop")),
-        PathBuf::from,
-    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(target_desktop, fs::Permissions::from_mode(0o755));
+    }
+    Ok(())
+}
 
-    let final_icon = if data.icon.is_empty() || data.icon == "wine" {
-        "wine".to_string()
-    } else {
-        persist_icon(&data.icon)
-    };
-
-    let exe_dir = Path::new(&actual_exe)
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .to_string_lossy()
-        .to_string();
+fn write_shortcut_desktop_file(
+    target_desktop: &Path,
+    data: &UmuShortcutData,
+    decl: &SbRunConfig,
+    actual_exe: &str,
+    final_icon: &str,
+    exe_dir: &str,
+    lnk_path: &str,
+) -> io::Result<()> {
+    let sb = data
+        .sandbox
+        .clone()
+        .unwrap_or_else(|| SandboxFormData::umu_defaults(decl));
+    let (sec_allow, sec_block) = sb.seccomp_diff(decl);
+    let sec_allow_str = sec_allow.join(",");
+    let sec_block_str = sec_block.join(",");
+    let bridges_str = sb.bridges.join(" ");
 
     let bool_str = |b: bool| if b { "1" } else { "0" };
     let use_steam_ports = data.steam.steam || data.display.overlay;
@@ -259,18 +342,17 @@ pub fn save_shortcut_to_desktop(
         "singbox" => "singbox",
         _ => "sandboxed",
     };
-
     let exec_cmd = format!("umu-run-wrapper \"{}\"", target_desktop.to_string_lossy());
 
     let props = [
         ("Type", "Application"),
         ("Name", data.name.as_str()),
         ("Exec", exec_cmd.as_str()),
-        ("Icon", final_icon.as_str()),
-        ("Path", exe_dir.as_str()),
+        ("Icon", final_icon),
+        ("Path", exe_dir),
         ("Terminal", "false"),
         ("Categories", "Game;"),
-        ("X-UMU-Actual-Exe", actual_exe.as_str()),
+        ("X-UMU-Actual-Exe", actual_exe),
         ("X-UMU-Raw-Args", data.args.as_str()),
         ("X-UMU-Prefix-Name", data.prefix.as_str()),
         ("X-UMU-GPU-Select", data.gpu.as_str()),
@@ -287,21 +369,82 @@ pub fn save_shortcut_to_desktop(
         ("X-UMU-Sandbox", bool_str(data.isolation.sandbox)),
         ("X-UMU-Gamepad", bool_str(data.isolation.gamepad)),
         ("X-UMU-Network", net_val),
+        ("X-UMU-Singbox-Config", sb.singbox_config.as_str()),
+        ("X-UMU-Pulse", sb.pulse.as_str()),
+        ("X-UMU-Pipewire", sb.pipewire.as_str()),
+        ("X-UMU-GPU", bool_str(sb.hw.gpu)),
+        ("X-UMU-Webcam", sb.webcam.as_str()),
+        ("X-UMU-DBus", sb.dbus.as_str()),
+        ("X-UMU-DBus-Args", sb.dbus_args.as_str()),
+        ("X-UMU-SHM", sb.shm.as_str()),
+        ("X-UMU-Tmp", sb.tmp.as_str()),
+        ("X-UMU-Landlock", bool_str(sb.sec.landlock)),
+        ("X-UMU-Seccomp", bool_str(sb.sec.seccomp)),
+        ("X-UMU-Seccomp-Allow", sec_allow_str.as_str()),
+        ("X-UMU-Seccomp-Block", sec_block_str.as_str()),
+        ("X-UMU-Share-Pid", bool_str(sb.runtime.share_pid)),
+        ("X-UMU-Portals", bool_str(sb.sec.portals)),
+        ("X-UMU-Tmpfs", bool_str(sb.runtime.tmpfs)),
+        ("X-UMU-Vpnify", bool_str(sb.runtime.vpnify)),
+        ("X-UMU-Bridges", bridges_str.as_str()),
+        ("X-UMU-Bwrap-Args", sb.bwrap_args.as_str()),
+        ("X-UMU-Env", sb.extra_env.as_str()),
         ("X-UMU-Extra-Paths", data.extra_paths.as_str()),
-        ("X-UMU-Lnk-Path", lnk_path.as_str()),
+        ("X-UMU-Lnk-Path", lnk_path),
     ];
+    write_desktop_entry_file(target_desktop, &props)
+}
 
-    let mut desktop_content = String::from("[Desktop Entry]\n");
-    for (k, v) in &props {
-        let _ = writeln!(desktop_content, "{k}={v}");
-    }
-    fs::write(&target_desktop, &desktop_content)?;
+/// Saves the UMU configuration into a `.desktop` file.
+///
+/// # Errors
+///
+/// Returns an [`io::Error`] if creating directories or writing the desktop entry fails.
+pub fn save_shortcut_to_desktop(
+    data: &UmuShortcutData,
+    dest_path: Option<&str>,
+) -> io::Result<PathBuf> {
+    let decl = SbRunConfig::load_or_exit();
+    let desktop_dir = get_xdg_data_home().join("applications");
+    fs::create_dir_all(&desktop_dir)?;
+    fs::create_dir_all(get_xdg_data_home().join("icons/umu"))?;
 
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(&target_desktop, fs::Permissions::from_mode(0o755));
+    let (actual_exe, lnk_path) = if data.exe.to_lowercase().ends_with(".lnk") {
+        resolve_actual_exe_from_lnk(&data.exe, &data.prefix)
+    } else {
+        (data.exe.clone(), data.lnk_path.clone())
+    };
+
+    let digest = crate::md5::compute(format!("{}{}", actual_exe, data.args).as_bytes());
+    let mut hash_hex = String::with_capacity(32);
+    for byte in digest {
+        let _ = write!(hash_hex, "{byte:02x}");
     }
+    let target_desktop = dest_path.map_or_else(
+        || desktop_dir.join(format!("umu-{}.desktop", &hash_hex[..8])),
+        PathBuf::from,
+    );
+
+    let final_icon = if data.icon.is_empty() || data.icon == "wine" {
+        "wine".to_string()
+    } else {
+        persist_icon(&data.icon)
+    };
+    let exe_dir = Path::new(&actual_exe)
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .to_string_lossy()
+        .to_string();
+
+    write_shortcut_desktop_file(
+        &target_desktop,
+        data,
+        &decl,
+        &actual_exe,
+        &final_icon,
+        &exe_dir,
+        &lnk_path,
+    )?;
 
     let _ = Command::new("notify-send")
         .args([
@@ -330,14 +473,11 @@ pub struct UmuOptionsWidget {
     pub chk_gamemode: gtk4::CheckButton,
     pub chk_mangohud: gtk4::CheckButton,
     pub chk_wayland: gtk4::CheckButton,
-    pub cmb_xwayland: gtk4::ComboBoxText,
     pub chk_steam: gtk4::CheckButton,
     pub chk_overlay: gtk4::CheckButton,
     pub chk_vpn: gtk4::CheckButton,
     pub chk_sandbox: gtk4::CheckButton,
-    pub cmb_network: gtk4::ComboBoxText,
-    pub chk_gamepad: gtk4::CheckButton,
-    pub paths_widget: PathsListWidget,
+    pub sb_widget: SandboxOptionsWidget,
     pub lnk_path: Rc<RefCell<String>>,
 }
 
@@ -431,9 +571,27 @@ fn build_main_toggles(grid: &gtk4::Grid, data: &UmuShortcutData) -> TogglesWidge
     }
 }
 
+fn build_initial_sandbox_data(data: &UmuShortcutData, decl: &SbRunConfig) -> SandboxFormData {
+    data.sandbox.clone().unwrap_or_else(|| {
+        let mut sb = SandboxFormData::umu_defaults(decl);
+        if !data.network_mode.is_empty() {
+            sb.network.clone_from(&data.network_mode);
+        }
+        if !data.display.xwayland_mode.is_empty() {
+            sb.x11.clone_from(&data.display.xwayland_mode);
+        }
+        sb.hw.gamepad = data.isolation.gamepad;
+        if !data.extra_paths.trim().is_empty() {
+            sb.extra_paths.clone_from(&data.extra_paths);
+        }
+        sb
+    })
+}
+
 impl UmuOptionsWidget {
     #[must_use]
     pub fn new(parent_window: &gtk4::Window, initial_data: Option<&UmuShortcutData>) -> Self {
+        let decl = SbRunConfig::load_or_exit();
         let defaults = UmuShortcutData::default();
         let data = initial_data.unwrap_or(&defaults);
 
@@ -444,11 +602,6 @@ impl UmuOptionsWidget {
         let grid = gtk4::Grid::new();
         grid.set_column_spacing(15);
         grid.set_row_spacing(8);
-
-        let paths_widget = PathsListWidget::new(parent_window);
-        if !data.extra_paths.trim().is_empty() {
-            paths_widget.load_from_string_args(&data.extra_paths);
-        }
 
         let (exe_hbox, exe_entry) = Self::build_exe_row(parent_window, &data.exe);
         let cmb_proton = Self::build_proton_combo(&data.proton);
@@ -472,7 +625,6 @@ impl UmuOptionsWidget {
         ent_args.set_placeholder_text(Some("VAR=1 %command% --dx11"));
 
         let (gameid_hbox, ent_gameid, btn_steam_search) = Self::build_gameid_row(&data.gameid);
-
         let search_handler = build_steam_search_handler(
             parent_window,
             &ent_gameid,
@@ -493,29 +645,37 @@ impl UmuOptionsWidget {
         attach_grid_row(&grid, 8, "Game ID / App ID", gameid_hbox.upcast_ref());
 
         let toggles = build_main_toggles(&grid, data);
-
         left_box.append(&grid);
 
         let separator = gtk4::Separator::new(gtk4::Orientation::Vertical);
         separator.set_visible(data.isolation.sandbox);
 
-        let (sandbox_pane, cmb_network, cmb_xwayland, chk_gamepad) =
-            Self::build_sandbox_pane(data, &paths_widget);
+        let init_sb = build_initial_sandbox_data(data, &decl);
+        let sb_widget =
+            SandboxOptionsWidget::new(parent_window, &decl, SandboxUiMode::Umu, Some(&init_sb));
+        sb_widget.combo_x11.set_sensitive(!data.display.wayland);
+
+        let sandbox_scroll = gtk4::ScrolledWindow::builder()
+            .hscrollbar_policy(gtk4::PolicyType::Never)
+            .vscrollbar_policy(gtk4::PolicyType::Automatic)
+            .min_content_width(430)
+            .min_content_height(520)
+            .vexpand(true)
+            .child(sb_widget.widget())
+            .build();
+        sandbox_scroll.set_visible(data.isolation.sandbox);
 
         Self::connect_wayland_overlay_lock(
             &toggles.wayland,
             &toggles.overlay,
-            &cmb_xwayland,
+            &sb_widget.combo_x11,
             data.display.overlay,
         );
-
-        Self::connect_sandbox_expand(parent_window, &toggles.sandbox, &sandbox_pane, &separator);
+        Self::connect_sandbox_expand(parent_window, &toggles.sandbox, &sandbox_scroll, &separator);
 
         container.append(&left_box);
         container.append(&separator);
-        container.append(&sandbox_pane);
-
-        let lnk_path = Rc::new(RefCell::new(data.lnk_path.clone()));
+        container.append(&sandbox_scroll);
 
         Self {
             container,
@@ -531,15 +691,12 @@ impl UmuOptionsWidget {
             chk_gamemode: toggles.gamemode,
             chk_mangohud: toggles.mangohud,
             chk_wayland: toggles.wayland,
-            cmb_xwayland,
             chk_steam: toggles.steam,
             chk_overlay: toggles.overlay,
             chk_vpn: toggles.vpn,
             chk_sandbox: toggles.sandbox,
-            cmb_network,
-            chk_gamepad,
-            paths_widget,
-            lnk_path,
+            sb_widget,
+            lnk_path: Rc::new(RefCell::new(data.lnk_path.clone())),
         }
     }
 
@@ -725,65 +882,10 @@ impl UmuOptionsWidget {
         }
     }
 
-    fn build_sandbox_pane(
-        data: &UmuShortcutData,
-        paths_widget: &PathsListWidget,
-    ) -> (
-        gtk4::Box,
-        gtk4::ComboBoxText,
-        gtk4::ComboBoxText,
-        gtk4::CheckButton,
-    ) {
-        let sandbox_pane = gtk4::Box::new(gtk4::Orientation::Vertical, 10);
-        sandbox_pane.set_size_request(380, -1);
-        sandbox_pane.set_vexpand(true);
-        sandbox_pane.set_visible(data.isolation.sandbox);
-
-        let sb_grid = gtk4::Grid::new();
-        sb_grid.set_column_spacing(12);
-        sb_grid.set_row_spacing(8);
-
-        let cmb_network = gtk4::ComboBoxText::new();
-        cmb_network.append(Some("sandboxed"), "Изолированная (User-mode pasta)");
-        cmb_network.append(Some("singbox"), "VPN (Sing-box TUN)");
-        cmb_network.append(Some("passthrough"), "Прямой доступ (Passthrough)");
-        cmb_network.append(Some("off"), "Отключена (Без сети)");
-        if !cmb_network.set_active_id(Some(&data.network_mode)) {
-            cmb_network.set_active(Some(0));
-        }
-        attach_grid_row(&sb_grid, 0, "Режим сети", cmb_network.upcast_ref());
-
-        let cmb_xwayland = gtk4::ComboBoxText::new();
-        cmb_xwayland.append(Some("passthrough"), "Прямой доступ (Хост X11)");
-        cmb_xwayland.append(Some("sandboxed"), "Изолированный (xwayland-satellite)");
-        if !cmb_xwayland.set_active_id(Some(&data.display.xwayland_mode)) {
-            cmb_xwayland.set_active(Some(0));
-        }
-        cmb_xwayland.set_sensitive(!data.display.wayland);
-        attach_grid_row(&sb_grid, 1, "XWayland (X11)", cmb_xwayland.upcast_ref());
-
-        let chk_gamepad = gtk4::CheckButton::new();
-        chk_gamepad.set_active(data.isolation.gamepad);
-        attach_grid_row(
-            &sb_grid,
-            2,
-            "Геймпад (/dev/input)",
-            chk_gamepad.upcast_ref(),
-        );
-
-        sandbox_pane.append(&sb_grid);
-
-        let pw_widget = paths_widget.widget();
-        pw_widget.set_vexpand(true);
-        sandbox_pane.append(pw_widget);
-
-        (sandbox_pane, cmb_network, cmb_xwayland, chk_gamepad)
-    }
-
     fn connect_sandbox_expand(
         parent: &gtk4::Window,
         chk_sandbox: &gtk4::CheckButton,
-        sandbox_pane: &gtk4::Box,
+        sandbox_pane: &gtk4::ScrolledWindow,
         separator: &gtk4::Separator,
     ) {
         let p_win = parent.clone();
@@ -794,7 +896,7 @@ impl UmuOptionsWidget {
             s_pane.set_visible(active);
             sep.set_visible(active);
             if active {
-                p_win.set_default_size(960, -1);
+                p_win.set_default_size(980, -1);
             } else {
                 p_win.set_default_size(560, -1);
             }
@@ -820,18 +922,7 @@ impl UmuOptionsWidget {
             .to_string();
         let gpu = self.cmb_gpu.active_text().unwrap_or_default().to_string();
         let gameid = self.ent_gameid.text().to_string();
-
-        let network_mode = self
-            .cmb_network
-            .active_id()
-            .unwrap_or_else(|| "sandboxed".into())
-            .to_string();
-        let xwayland_mode = self
-            .cmb_xwayland
-            .active_id()
-            .unwrap_or_else(|| "passthrough".into())
-            .to_string();
-        let extra_paths = self.paths_widget.to_string_args();
+        let sb = self.sb_widget.get_data();
         let lnk_path = self.lnk_path.borrow().clone();
 
         UmuShortcutData {
@@ -858,7 +949,7 @@ impl UmuOptionsWidget {
             display: DisplayToggles {
                 wayland: self.chk_wayland.is_active(),
                 overlay: self.chk_overlay.is_active(),
-                xwayland_mode,
+                xwayland_mode: sb.x11.clone(),
             },
             steam: SteamToggles {
                 steam: self.chk_steam.is_active(),
@@ -866,17 +957,24 @@ impl UmuOptionsWidget {
             isolation: IsolationToggles {
                 vpn: self.chk_vpn.is_active(),
                 sandbox: self.chk_sandbox.is_active(),
-                gamepad: self.chk_gamepad.is_active(),
+                gamepad: sb.hw.gamepad,
             },
-            network_mode,
-            extra_paths,
+            network_mode: sb.network.clone(),
+            extra_paths: sb.extra_paths.clone(),
             lnk_path,
+            sandbox: Some(sb),
         }
     }
 
     #[must_use]
     pub fn build_launch_envs(&self) -> HashMap<String, String> {
         let data = self.get_data();
+        let sb = data
+            .sandbox
+            .clone()
+            .unwrap_or_else(|| SandboxFormData::umu_defaults(self.sb_widget.decl()));
+        let (sec_allow, sec_block) = sb.seccomp_diff(self.sb_widget.decl());
+
         let mut envs = HashMap::new();
         envs.insert("UMU_PROTON_TYPE".into(), data.proton);
         envs.insert("UMU_GPU_SELECT".into(), data.gpu);
@@ -918,6 +1016,30 @@ impl UmuOptionsWidget {
         envs.insert("USE_NETWORK".into(), net_val.into());
         let use_steam_ports = data.steam.steam || data.display.overlay;
         envs.insert("USE_STEAM_PORTS".into(), bool_str(use_steam_ports).into());
+
+        envs.insert("UMU_SINGBOX_CONFIG".into(), sb.singbox_config);
+        envs.insert("UMU_PULSE_MODE".into(), sb.pulse);
+        envs.insert("UMU_PIPEWIRE_MODE".into(), sb.pipewire);
+        envs.insert("UMU_SB_GPU".into(), bool_str(sb.hw.gpu).into());
+        envs.insert("UMU_WEBCAM".into(), sb.webcam);
+        envs.insert("UMU_DBUS_MODE".into(), sb.dbus);
+        envs.insert("UMU_DBUS_ARGS".into(), sb.dbus_args);
+        envs.insert("UMU_SHM_MODE".into(), sb.shm);
+        envs.insert("UMU_TMP_MODE".into(), sb.tmp);
+        envs.insert("UMU_LANDLOCK".into(), bool_str(sb.sec.landlock).into());
+        envs.insert("UMU_SECCOMP".into(), bool_str(sb.sec.seccomp).into());
+        envs.insert("UMU_SECCOMP_ALLOW".into(), sec_allow.join(","));
+        envs.insert("UMU_SECCOMP_BLOCK".into(), sec_block.join(","));
+        envs.insert(
+            "UMU_SHARE_PID".into(),
+            bool_str(sb.runtime.share_pid).into(),
+        );
+        envs.insert("UMU_PORTALS".into(), bool_str(sb.sec.portals).into());
+        envs.insert("UMU_TMPFS".into(), bool_str(sb.runtime.tmpfs).into());
+        envs.insert("UMU_VPNIFY".into(), bool_str(sb.runtime.vpnify).into());
+        envs.insert("UMU_BRIDGES".into(), sb.bridges.join(" "));
+        envs.insert("UMU_BWRAP_ARGS".into(), sb.bwrap_args);
+        envs.insert("UMU_SB_ENV".into(), sb.extra_env);
 
         if !data.extra_paths.is_empty() {
             envs.insert("UMU_EXTRA_PATHS".into(), data.extra_paths);

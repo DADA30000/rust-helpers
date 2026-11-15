@@ -14,7 +14,9 @@ use std::process::Command;
 use std::rc::Rc;
 use std::thread;
 
+pub mod sandbox_ui;
 pub mod shortcut_editor;
+pub use sandbox_ui::*;
 pub use shortcut_editor::*;
 
 struct TempDir(PathBuf);
